@@ -376,20 +376,13 @@ it('assesses finished units with a separate strict schema through the real SDK',
       {
         id: 'u0',
         category: 'personal_fact',
-        claims: [
-          {
-            start: 0,
-            end: 24,
-            sourceId: 's1',
-            quote: 'I built a synthetic app.',
-          },
-        ],
+        evidence: { sourceId: 's1', quote: 'I built a synthetic app.' },
       },
     ],
   };
   const { provider, requests } = fixture([textDraft(JSON.stringify(output))]);
   const request = {
-    units: [{ id: 'u0', start: 0, end: 24, text: 'I built a synthetic app.' }],
+    units: [{ id: 'u0', text: 'I built a synthetic app.' }],
     sources: [{ id: 's1', excerpt: 'I built a synthetic app.' }],
   };
   const result = await provider.assessDraft(request, signal());

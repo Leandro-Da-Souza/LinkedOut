@@ -26,7 +26,7 @@ import { EMPTY_KNOWLEDGE } from '../domain/knowledge.js';
 import type { KnowledgeReader } from '../domain/knowledge.js';
 import { groundDraft } from './grounding.js';
 
-export const PROMPT_VERSION = 'draft-v4-body-only';
+export const PROMPT_VERSION = 'draft-v5-separated-facts';
 export const PIPELINE_VERSION = `${PROMPT_VERSION}:${ASSESSMENT_VERSION}:${GROUNDING_POLICY_VERSION}`;
 export class DraftService {
   constructor(
@@ -131,7 +131,10 @@ export class DraftService {
       const bodyHash = digest(candidate.body);
       const assessed = await this.provider.assessDraft(
         {
-          units: bodyUnits(candidate.body),
+          units: bodyUnits(candidate.body).map(({ id, text }) => ({
+            id,
+            text,
+          })),
           sources: knowledge.sources.map(({ id, excerpt }) => ({
             id,
             excerpt,

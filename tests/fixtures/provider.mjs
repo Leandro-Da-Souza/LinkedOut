@@ -75,10 +75,14 @@ export function fixtureProvider(options = {}) {
               type: 'output_text',
               annotations: [],
               text: JSON.stringify({
-                units: data.units.map((unit) => ({
-                  id: unit.id,
+                units: data.units.map((unit, index) => ({
+                  id:
+                    mode === 'invalid-assessment' &&
+                    index === data.units.length - 1
+                      ? 'PRIVATE_INVALID_ID'
+                      : unit.id,
                   category: 'advice_opinion_question',
-                  claims: [],
+                  evidence: null,
                 })),
               }),
             },

@@ -2,8 +2,8 @@ import { z } from 'zod';
 import type { Draft, GeneratedBody, ModelMetadata } from './contracts.js';
 import type { GroundingDiagnostic, ErrorCode } from './errors.js';
 
-export const ASSESSMENT_VERSION = 'assessment-v1';
-export const GROUNDING_POLICY_VERSION = 'exact-attribution-v1';
+export const ASSESSMENT_VERSION = 'assessment-v2';
+export const GROUNDING_POLICY_VERSION = 'whole-unit-attribution-v2';
 export interface BodyUnit {
   id: string;
   start: number;
@@ -11,7 +11,7 @@ export interface BodyUnit {
   text: string;
 }
 export interface AssessmentRequest {
-  units: BodyUnit[];
+  units: Pick<BodyUnit, 'id' | 'text'>[];
   sources: { id: string; excerpt: string }[];
 }
 const category = z.enum([
@@ -20,18 +20,16 @@ const category = z.enum([
   'advice_opinion_question',
   'uncertain',
 ]);
-const span = z.strictObject({
-  start: z.number().int(),
-  end: z.number().int(),
-  sourceId: z.string().nullable(),
-  quote: z.string().nullable(),
+const evidence = z.strictObject({
+  sourceId: z.string(),
+  quote: z.string(),
 });
 export const assessmentWireSchema = z.strictObject({
   units: z.array(
     z.strictObject({
       id: z.string(),
       category,
-      claims: z.array(span),
+      evidence: evidence.nullable(),
     }),
   ),
 });
@@ -41,18 +39,27 @@ export const assessmentSchema = z.strictObject({
       z.strictObject({
         id: z.string().max(30),
         category,
-        claims: z
-          .array(
-            span.extend({
-              sourceId: z.string().max(150).nullable(),
-              quote: z.string().min(1).max(1500).nullable(),
-            }),
-          )
-          .max(20),
+        evidence: evidence
+          .extend({
+            sourceId: z.string().max(150),
+            quote: z.string().min(1).max(1500),
+          })
+          .nullable(),
       }),
     )
     .max(200),
 });
+export interface AssessmentDiagnostic {
+  reason:
+    | 'INVALID_SCHEMA'
+    | 'UNIT_LIMIT'
+    | 'MISSING_UNIT'
+    | 'DUPLICATE_UNIT'
+    | 'UNKNOWN_UNIT'
+    | 'CONTRADICTORY_ADVICE'
+    | 'FINDING_LIMIT';
+  unitId?: string;
+}
 export type EvidenceStatus =
   'exact_match' | 'plausible_paraphrase' | 'unsupported' | 'invalid_reference';
 export interface AssessmentFinding {
@@ -65,8 +72,8 @@ export interface AssessmentFinding {
   quote?: string;
 }
 export interface AssessmentReport {
-  version: typeof ASSESSMENT_VERSION;
-  policyVersion: typeof GROUNDING_POLICY_VERSION;
+  version: 'assessment-v1' | typeof ASSESSMENT_VERSION;
+  policyVersion: 'exact-attribution-v1' | typeof GROUNDING_POLICY_VERSION;
   bodyHash: string;
   knowledgeHash: string;
   complete: boolean;
@@ -76,7 +83,7 @@ export interface AssessmentReport {
     unitId: string;
     start: number;
     end: number;
-    category: z.infer<typeof category>;
+    category: z.infer<typeof category> | null;
   }[];
   issues: (
     | 'INVALID_ASSESSMENT'
@@ -87,6 +94,7 @@ export interface AssessmentReport {
     | 'SNAPSHOT_CHANGED'
     | 'HEURISTIC_FLAG'
   )[];
+  diagnostics?: AssessmentDiagnostic[];
   heuristicDiagnostic?: GroundingDiagnostic;
   metadata?: ModelMetadata;
 }

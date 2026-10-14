@@ -45,89 +45,111 @@ export function assessBody(
     complete: false,
     blocked: true,
     findings: [],
-    units: [],
+    units: units.map(({ id, start, end }) => ({
+      unitId: id,
+      start,
+      end,
+      category: null,
+    })),
+    diagnostics: [],
     issues: [],
   };
   const claims: GeneratedDraft['claims'] = [];
   const parsed = assessmentSchema.safeParse(raw);
-  const invalid = () => {
-    report.issues.push('INVALID_ASSESSMENT');
-    return { report, claims: [] };
+  const diagnose = (
+    reason: NonNullable<AssessmentReport['diagnostics']>[number]['reason'],
+    unitId?: string,
+  ) => {
+    if (report.diagnostics!.length >= 200) return;
+    report.diagnostics!.push({ reason, ...(unitId ? { unitId } : {}) });
   };
-  if (
-    !parsed.success ||
-    units.length > 200 ||
-    parsed.data.units.length !== units.length
-  )
-    return invalid();
-  const seen = new Set<string>();
-  for (const assessed of parsed.data.units) {
-    const unit = units.find((candidate) => candidate.id === assessed.id);
-    if (!unit || seen.has(unit.id)) return invalid();
-    seen.add(unit.id);
-    report.units.push({
-      unitId: unit.id,
-      start: unit.start,
-      end: unit.end,
-      category: assessed.category,
-    });
-    if (assessed.category === 'uncertain')
-      report.issues.push('UNCERTAIN_CONTENT');
+  if (!parsed.success) diagnose('INVALID_SCHEMA');
+  if (units.length > 200) diagnose('UNIT_LIMIT');
+  if (parsed.success) {
+    const canonical = new Set(units.map((unit) => unit.id));
+    const byId = new Map<string, typeof parsed.data.units>();
+    let unknown = false;
+    for (const assessed of parsed.data.units) {
+      if (!canonical.has(assessed.id)) {
+        unknown = true;
+        continue;
+      }
+      const entries = byId.get(assessed.id) ?? [];
+      entries.push(assessed);
+      byId.set(assessed.id, entries);
+    }
+    if (unknown) diagnose('UNKNOWN_UNIT');
+    for (const unit of report.units) {
+      const entries = byId.get(unit.unitId) ?? [];
+      if (entries.length === 0) diagnose('MISSING_UNIT', unit.unitId);
+      else if (entries.length > 1) diagnose('DUPLICATE_UNIT', unit.unitId);
+      else {
+        const assessed = entries[0]!;
+        unit.category = assessed.category;
+        if (
+          assessed.category === 'advice_opinion_question' &&
+          assessed.evidence !== null
+        )
+          diagnose('CONTRADICTORY_ADVICE', unit.unitId);
+      }
+    }
     if (
-      assessed.category !== 'advice_opinion_question' &&
-      assessed.claims.length === 0
+      parsed.data.units.filter(
+        (unit) => unit.category !== 'advice_opinion_question',
+      ).length > 20
     )
-      report.issues.push('UNSUPPORTED_FACT');
-    let previousEnd = -1;
-    for (const claim of assessed.claims) {
-      if (
-        claim.start < 0 ||
-        claim.end <= claim.start ||
-        claim.end > unit.text.length ||
-        claim.start < previousEnd ||
-        report.findings.length >= 20
-      )
-        return invalid();
-      previousEnd = claim.end;
-      const text = unit.text.slice(claim.start, claim.end);
-      const source = knowledge.sources.find(
-        (entry) => entry.id === claim.sourceId,
-      );
-      const status =
-        claim.sourceId === null && claim.quote === null
-          ? 'unsupported'
-          : !source ||
-              !claim.quote ||
-              normalize(claim.quote).length < 12 ||
-              !normalize(source.excerpt).includes(normalize(claim.quote))
-            ? 'invalid_reference'
-            : normalize(text).length >= 12 &&
-                normalize(text) === normalize(claim.quote)
-              ? 'exact_match'
-              : 'plausible_paraphrase';
-      report.findings.push({
-        unitId: unit.id,
-        start: unit.start + claim.start,
-        end: unit.start + claim.end,
-        category: assessed.category,
-        status,
-        ...(source && claim.quote && status !== 'invalid_reference'
-          ? { sourceId: source.id, quote: claim.quote }
-          : {}),
-      });
-      if (status === 'exact_match')
-        claims.push({ text, sourceId: source!.id, quote: claim.quote! });
-      else
-        report.issues.push(
-          status === 'unsupported'
-            ? 'UNSUPPORTED_FACT'
-            : status === 'invalid_reference'
-              ? 'INVALID_REFERENCE'
-              : 'PARAPHRASE_REQUIRES_REVIEW',
+      diagnose('FINDING_LIMIT');
+    // Finish all structural validation before trusting any proposed evidence.
+    if (report.diagnostics!.length === 0) {
+      for (const unit of units) {
+        const assessed = byId.get(unit.id)![0]!;
+        if (assessed.category === 'uncertain')
+          report.issues.push('UNCERTAIN_CONTENT');
+        if (assessed.category === 'advice_opinion_question') continue;
+        const evidence = assessed.evidence;
+        const source = knowledge.sources.find(
+          (entry) => entry.id === evidence?.sourceId,
         );
+        const status =
+          evidence === null
+            ? 'unsupported'
+            : !source ||
+                normalize(evidence.quote).length < 12 ||
+                !normalize(source.excerpt).includes(normalize(evidence.quote))
+              ? 'invalid_reference'
+              : normalize(unit.text).length >= 12 &&
+                  normalize(unit.text) === normalize(evidence.quote)
+                ? 'exact_match'
+                : 'plausible_paraphrase';
+        report.findings.push({
+          unitId: unit.id,
+          start: unit.start,
+          end: unit.end,
+          category: assessed.category,
+          status,
+          ...(source && evidence && status !== 'invalid_reference'
+            ? { sourceId: source.id, quote: evidence.quote }
+            : {}),
+        });
+        if (status === 'exact_match')
+          claims.push({
+            text: unit.text,
+            sourceId: source!.id,
+            quote: evidence!.quote,
+          });
+        else
+          report.issues.push(
+            status === 'unsupported'
+              ? 'UNSUPPORTED_FACT'
+              : status === 'invalid_reference'
+                ? 'INVALID_REFERENCE'
+                : 'PARAPHRASE_REQUIRES_REVIEW',
+          );
+      }
+      report.complete = true;
     }
   }
-  report.complete = true;
+  if (!report.complete) report.issues.push('INVALID_ASSESSMENT');
   // Inspect each uncovered occurrence, not a global string replacement that could
   // accidentally hide a second, unattributed occurrence of the same words.
   let remaining = body.body;

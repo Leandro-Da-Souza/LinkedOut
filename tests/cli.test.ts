@@ -75,6 +75,41 @@ function cli(env: Record<string, string>, args: string[], production = false) {
 }
 
 describe('CLI and agent subprocesses', () => {
+  it('retains complete safe diagnostics for invalid whole-unit assessment', () => {
+    const env = {
+      ...workspace(),
+      LINKEDOUT_TEST_RESPONSE: 'invalid-assessment',
+    };
+    const failed = cli(env, [
+      'drafts',
+      'create',
+      '--brief',
+      'Consider testing. Consider profiling.',
+    ]);
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).not.toContain('PRIVATE_INVALID_ID');
+    const listed = JSON.parse(cli(env, ['artifacts', 'list'], true).stdout);
+    const artifact = JSON.parse(
+      cli(env, ['artifacts', 'get', listed.artifacts[0].id], true).stdout,
+    ).artifact;
+    expect(artifact.assessment).toMatchObject({
+      version: 'assessment-v2',
+      complete: false,
+      blocked: true,
+      findings: [],
+      issues: ['INVALID_ASSESSMENT'],
+    });
+    expect(artifact.assessment.units.length).toBeGreaterThan(1);
+    expect(artifact.assessment.diagnostics).toEqual([
+      { reason: 'UNKNOWN_UNIT' },
+      {
+        reason: 'MISSING_UNIT',
+        unitId: artifact.assessment.units.at(-1).unitId,
+      },
+    ]);
+    expect(JSON.stringify(artifact)).not.toContain('PRIVATE_INVALID_ID');
+  });
+
   it('exposes safe grounding diagnostics through list and get in new processes', () => {
     const env = workspace();
     // The injected fixture echoes the brief into its synthetic output.
@@ -166,7 +201,7 @@ describe('CLI and agent subprocesses', () => {
     }
   });
 
-  it('runs the bounded agent using two SDK calls, persists preferences and replays without another call', () => {
+  it('runs the bounded agent using three SDK calls, persists preferences and replays without another call', () => {
     const env = workspace();
     const args = [
       'agent',

@@ -359,14 +359,12 @@ describe('knowledge in shared drafting and bounded workflows', () => {
               units: request.units.map((unit) => ({
                 id: unit.id,
                 category: 'personal_fact',
-                claims: [
-                  {
-                    start: 0,
-                    end: unit.text.length,
-                    sourceId: request.sources[0]?.id ?? null,
-                    quote: request.sources[0]?.excerpt ?? null,
-                  },
-                ],
+                evidence: request.sources[0]
+                  ? {
+                      sourceId: request.sources[0].id,
+                      quote: request.sources[0].excerpt,
+                    }
+                  : null,
               })),
             },
             metadata: { provider: 'fixture', model: 'fixture' },

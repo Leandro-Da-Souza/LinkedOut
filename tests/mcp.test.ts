@@ -170,6 +170,52 @@ function body(result: CallToolResult): unknown {
 }
 
 describe('official MCP client over serialized stdio streams', () => {
+  it('returns complete safe whole-unit diagnostics through the official client', async () => {
+    const { env } = workspace();
+    const connected = await connection({
+      ...env,
+      LINKEDOUT_TEST_RESPONSE: 'invalid-assessment',
+    });
+    try {
+      const failed = await connected.client.callTool({
+        name: 'draft_post',
+        arguments: { brief: 'Consider testing. Consider profiling.' },
+      });
+      expect(failed.isError).toBe(true);
+      const failure = body(failed) as { error: { reviewArtifactId: string } };
+      const result = body(
+        await connected.client.callTool({
+          name: 'get_review_artifact',
+          arguments: { id: failure.error.reviewArtifactId },
+        }),
+      ) as { artifact: { assessment: { units: { unitId: string }[] } } };
+      expect(result).toMatchObject({
+        artifact: {
+          assessment: {
+            version: 'assessment-v2',
+            complete: false,
+            blocked: true,
+            findings: [],
+            issues: ['INVALID_ASSESSMENT'],
+            diagnostics: [
+              { reason: 'UNKNOWN_UNIT' },
+              {
+                reason: 'MISSING_UNIT',
+                unitId: result.artifact.assessment.units.at(-1)!.unitId,
+              },
+            ],
+          },
+        },
+      });
+      expect(result.artifact.assessment.units.length).toBeGreaterThan(1);
+      expect(JSON.stringify(result) + connected.stderr()).not.toContain(
+        'PRIVATE_INVALID_ID',
+      );
+    } finally {
+      await connected.close();
+    }
+  });
+
   it('persists and retrieves selected private evidence through the real MCP protocol', async () => {
     const { dir, env } = workspace();
     mkdirSync(join(dir, 'knowledge'));

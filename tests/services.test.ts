@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { digest } from '../src/application/assessment.js';
 import { AgentWorkflow } from '../src/application/agent.js';
 import { DraftService } from '../src/application/drafting.js';
 import { createTools, ToolRegistry } from '../src/application/tools.js';
@@ -52,7 +53,7 @@ function fakeProvider() {
         units: request.units.map((unit) => ({
           id: unit.id,
           category: 'advice_opinion_question',
-          claims: [],
+          evidence: null,
         })),
       },
       metadata: { provider: 'fixture', model: 'fixture-model' },
@@ -116,6 +117,92 @@ function openStore(dir: string): SqliteStore {
 }
 
 describe('shared drafting services with real SQLite', () => {
+  it.each(['direct', 'agent'] as const)(
+    'conflicts with old pipeline keys in %s mode before any provider call',
+    async (mode) => {
+      const f = fixture();
+      const method = mode === 'direct' ? 'reserveDraft' : 'reserveAgent';
+      const spy = vi.spyOn(f.store, method);
+      const input = {
+        brief: 'Consider testing.',
+        idempotencyKey: 'versioned-key',
+      };
+      const run = () =>
+        mode === 'direct'
+          ? f.service.create(input, context)
+          : f.agent.run(input, context);
+      await run();
+      const request = spy.mock.calls[0]![2] as Record<string, unknown>;
+      const oldVersion =
+        'draft-v4-body-only:assessment-v1:exact-attribution-v1';
+      const oldHash =
+        mode === 'direct'
+          ? digest({
+              request,
+              provider: f.provider.provider,
+              model: f.provider.model,
+              promptVersion: oldVersion,
+            })
+          : digest({
+              ...request,
+              input: { brief: input.brief },
+              promptVersion: oldVersion,
+            });
+      const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'));
+      db.prepare(
+        'UPDATE tool_executions SET request_hash = ? WHERE idempotency_key = ?',
+      ).run(oldHash, input.idempotencyKey);
+      db.close();
+      f.provider.generateDraft.mockClear();
+      f.provider.assessDraft.mockClear();
+      f.provider.proposeTools.mockClear();
+      await expect(run()).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_CONFLICT',
+      });
+      expect(f.provider.generateDraft).not.toHaveBeenCalled();
+      expect(f.provider.assessDraft).not.toHaveBeenCalled();
+      expect(f.provider.proposeTools).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reads v1 draft and blocked artifact reports unchanged after restart', async () => {
+    const f = fixture();
+    const saved = await f.service.create(
+      { brief: 'Historical draft' },
+      context,
+    );
+    f.provider.assessDraft.mockResolvedValueOnce({
+      output: { malformed: true },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    });
+    await expect(
+      f.service.create({ brief: 'Historical artifact' }, context),
+    ).rejects.toMatchObject({ code: 'UNGROUNDED_OUTPUT' });
+    const artifact = f.store.getReviewArtifact(
+      'local',
+      f.store.listReviewArtifacts('local').artifacts[0]!.id,
+    );
+    for (const record of [saved.draft, artifact]) {
+      record.promptVersion = 'draft-v4-body-only';
+      record.assessment!.version = 'assessment-v1';
+      record.assessment!.policyVersion = 'exact-attribution-v1';
+      delete record.assessment!.diagnostics;
+    }
+    f.store.close();
+    const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'));
+    db.prepare('UPDATE drafts SET draft_json = ? WHERE id = ?').run(
+      JSON.stringify(saved.draft),
+      saved.draft.id,
+    );
+    db.prepare(
+      'UPDATE review_artifacts SET artifact_json = ? WHERE id = ?',
+    ).run(JSON.stringify(artifact), artifact.id);
+    db.close();
+    const reopened = openStore(f.dir);
+    expect(reopened.getDraft('local', saved.draft.id)).toEqual(saved.draft);
+    expect(reopened.getReviewArtifact('local', artifact.id)).toEqual(artifact);
+  });
+
   it.each([1, 2])(
     'migrates version %s history without inventing assessments or changing saved drafts',
     async (version) => {
@@ -311,7 +398,7 @@ describe('shared drafting services with real SQLite', () => {
     expect(result.draft).toMatchObject({
       userId: 'alice',
       status: 'draft',
-      promptVersion: 'draft-v4-body-only',
+      promptVersion: 'draft-v5-separated-facts',
       provenance: {
         origin: 'user_provided',
         profile,
@@ -1133,6 +1220,9 @@ describe('private review artifacts', () => {
       { ...context, knowledge },
     );
     expect(result.draft.provenance.knowledge).toEqual(knowledge);
+    expect(f.provider.assessDraft.mock.calls[0]?.[0].units).toEqual([
+      { id: 'u0', text: 'Consider testing carefully.' },
+    ]);
     expect(f.provider.assessDraft.mock.calls[0]?.[0].sources).toEqual([
       { id: 's', excerpt: 'Synthetic reference.' },
     ]);
