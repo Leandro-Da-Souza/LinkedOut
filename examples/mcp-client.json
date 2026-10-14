@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "linkedout": {
+      "command": "/absolute/path/to/node",
+      "args": [
+        "--env-file-if-exists=/absolute/path/to/linkedout/.env",
+        "/absolute/path/to/linkedout/dist/entrypoints/mcp.js"
+      ],
+      "env": {
+        "LINKEDOUT_KNOWLEDGE_DIR": "/absolute/path/to/linkedout/knowledge",
+        "LINKEDOUT_DATA_DIR": "/absolute/path/to/linkedout/.linkedout",
+        "LINKEDOUT_PROFILE_PATH": "/absolute/path/to/linkedout/user.json"
+      }
+    }
+  }
+}

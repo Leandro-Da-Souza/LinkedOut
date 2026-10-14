@@ -1,0 +1,12 @@
+{
+  "id": "local",
+  "name": "Alex Example",
+  "headline": "Software engineer building reliable tools",
+  "interests": ["TypeScript", "Developer experience", "Responsible AI"],
+  "audience": "Software engineers and engineering leaders",
+  "tone": "Clear, thoughtful, practical, and conversational",
+  "language": "English",
+  "writingSamples": [
+    "A useful engineering habit: make the failure visible before making the system more complex. Small feedback loops help us learn what actually needs to change."
+  ]
+}

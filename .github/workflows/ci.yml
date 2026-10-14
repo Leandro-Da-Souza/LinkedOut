@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Node 24 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install local PDF extraction utility
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      # npm test builds the application before exercising the real stdio server.
+      - run: npm test
+        env:
+          LINKEDOUT_REQUIRE_PDF_TESTS: ${{ runner.os == 'Linux' && '1' || '0' }}

@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+.linkedout
+package-lock.json
+.env
+user.json
+knowledge
+.knowledge

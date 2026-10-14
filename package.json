@@ -1,0 +1,40 @@
+{
+  "name": "linkedout",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Local LinkedIn content drafting through MCP and bounded agent workflows",
+  "type": "module",
+  "engines": {
+    "node": ">=24.16.0 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run build && vitest run",
+    "mcp": "node --env-file-if-exists=.env dist/entrypoints/mcp.js",
+    "agent": "node --env-file-if-exists=.env dist/entrypoints/cli.js agent",
+    "drafts": "node --env-file-if-exists=.env dist/entrypoints/cli.js drafts",
+    "runs": "node --env-file-if-exists=.env dist/entrypoints/cli.js runs",
+    "knowledge": "node --env-file-if-exists=.env dist/entrypoints/cli.js knowledge",
+    "smoke:live": "npm run build && node --env-file-if-exists=.env dist/entrypoints/smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "openai": "7.15.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "24.13.3",
+    "eslint": "10.9.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.68.0",
+    "vitest": "4.1.11"
+  }
+}

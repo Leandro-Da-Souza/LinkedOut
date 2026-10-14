@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.linkedout/
+user.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.npm-cache/
+# Private source materials and all derived extraction/index/cache artifacts.
+knowledge/
+.knowledge/
+*.knowledge.sqlite*
