@@ -32,14 +32,14 @@ npm run knowledge -- index
 npm run knowledge -- search --query "TypeScript reporting project"
 ```
 
-Drafting refreshes automatically and sends at most six relevant excerpts/6000 characters to the existing LLM request, instead of attaching every document. Document links are never fetched. Evidence IDs, excerpts and hashes are saved in provenance. Changes to evidence invalidate old idempotency fingerprints.
+Drafting refreshes automatically and sends at most six relevant excerpts/6000 characters to generation and independent assessment, instead of attaching every document. Document links are never fetched. Evidence IDs, excerpts and hashes are saved in provenance. Changes to evidence invalidate old idempotency fingerprints.
 
-Personal factual claims must quote retrieved evidence verbatim, with validated source links; unsupported detected assertions fail with `UNGROUNDED_OUTPUT`. Every new draft requires human review and surfaces missing evidence. Exact quotes do not prove truth, and heuristic checks cannot certify arbitrary prose or other languages. Review the [grounding tradeoffs](docs/milestone-1.5.md).
+Generation produces a body; an independent assessor then identifies claims in that immutable body. Application checks distinguish exact evidence matches, proposed paraphrases, unsupported assertions and invalid references. Only exact factual attribution can pass automatic checks; unresolved content fails with `UNGROUNDED_OUTPUT` and is retained as a private, non-publishable review artifact. Every new draft requires human review and surfaces missing evidence. Exact quotes do not prove truth, and heuristic checks cannot certify arbitrary prose or other languages. Review the [grounding tradeoffs](docs/milestone-1.5.md).
 
 ## Draft and retrieve
 
 ```sh
-# Direct drafting: one generation request.
+# Direct drafting: generation followed by assessment.
 npm run drafts -- create --brief "Share three lessons from adopting TypeScript in a small team."
 
 # Autonomous entry point: propose one tool call, then generate through the shared handler.
@@ -49,6 +49,9 @@ npm run drafts -- list --limit 20 --offset 0
 npm run drafts -- get <draft-uuid>
 npm run runs -- list
 npm run runs -- get <run-uuid>
+npm run artifacts -- list
+npm run artifacts -- get <artifact-uuid>
+npm run artifacts -- delete <artifact-uuid>
 ```
 
 Commands return JSON. A stored draft has a UUID, body, warnings, fixed `draft` status, user/run IDs, timestamps, model metadata, and generation provenance including the profile snapshot and supplied input. Review its facts and wording before manually sharing it.
@@ -73,6 +76,8 @@ Adapt [examples/mcp-client.json](examples/mcp-client.json) to your client's conf
 | `get_draft`   | `id` UUID                                                                                     | Stored draft                 |
 | `list_drafts` | Optional `limit` (1–100), `offset`                                                            | Paginated draft summaries    |
 
+Review artifacts are available through `list_review_artifacts` (pagination), `get_review_artifact` (`id`) and `delete_review_artifact` (`id`). They are separate from ordinary drafts. Lists return safe summaries; explicit retrieval returns private content/evidence. Deletion retains safe execution history and existing request snapshots; it does not securely erase database free space or backups.
+
 Discovery and retrieval work without an OpenAI key. Generation requires both key and model. The user identity comes from local configuration, never tool arguments or model output. Per-request writing preferences override profile defaults; writing samples and briefs are treated as untrusted input.
 
 ## Configuration and privacy
@@ -88,9 +93,9 @@ Discovery and retrieval work without an OpenAI key. Generation requires both key
 
 Profile fields are `id`, `name`, `headline`, `interests`, `audience`, `tone`, `language`, and `writingSamples`. Profiles allow at most 20 interests and three writing samples of 4000 characters each. Briefs allow at most 8000 characters; generated post bodies allow at most 3000 characters. Profiles are configuration, not learned memory.
 
-SQLite stores drafts, normalized inputs, profile snapshots, and execution history locally. Protect the data directory and backups as personal information; storage is not encrypted by the application. `.env`, personal `user.json`, and local data are ignored by Git. Logs contain sanitized operational metadata, not keys, briefs, writing samples, draft bodies, or raw provider errors.
+SQLite stores drafts, blocked review artifacts, normalized inputs, profile snapshots, and execution history locally. Protect the data directory and backups as personal information; storage is not encrypted by the application. `.env`, personal `user.json`, and local data are ignored by Git. Logs contain sanitized operational metadata, not keys, briefs, writing samples, draft bodies, or raw provider errors.
 
-OpenAI receives the brief, relevant profile information, and writing samples during generation and planning. Requests use `store: false`; this does not eliminate ordinary provider abuse-monitoring retention. Review [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data) before supplying sensitive content. Drafting can incur API charges, and the agent path normally makes two model requests. SDK retries can add requests; there is no exact monetary spending cap.
+OpenAI receives the brief, relevant profile information, and writing samples during generation and planning. Requests use `store: false`; this does not eliminate ordinary provider abuse-monitoring retention. Review [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data) before supplying sensitive content. Assessment separately sends the finished body and selected evidence, excluding profile and source paths. Drafting can incur API charges: direct drafting normally makes two model requests and the agent path three. SDK retries can add requests; there is no exact monetary spending cap.
 
 ## Verify
 
@@ -106,7 +111,7 @@ npm run smoke:live
 
 Automated tests require no live credentials. They cover shared services, real SQLite persistence, idempotency, failures and permissions, and the official MCP client against the compiled stdio server. Local HTTP fixtures exercise the real OpenAI SDK with deterministic responses. These are not live OpenAI results.
 
-The opt-in smoke command calls the real provider through MCP and the autonomous CLI entry point, then verifies both stored drafts through MCP after restarting the server. It normally makes three provider requests and retains the generated drafts in the configured data directory. A missing key, unavailable model, or network failure is reported as unsuccessful live verification; fixture responses are never substituted. CI is configured to run deterministic checks on Linux, macOS, and Windows; it does not run paid smoke tests.
+The opt-in smoke command calls the real provider through MCP and the autonomous CLI entry point, then verifies both stored drafts through MCP after restarting the server. It normally makes five provider requests and retains the generated drafts in the configured data directory. A missing key, unavailable model, or network failure is reported as unsuccessful live verification; fixture responses are never substituted. CI is configured to run deterministic checks on Linux, macOS, and Windows; it does not run paid smoke tests.
 
 ## Troubleshooting and architecture
 

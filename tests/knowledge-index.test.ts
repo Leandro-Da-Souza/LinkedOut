@@ -317,25 +317,13 @@ describe('knowledge in shared drafting and bounded workflows', () => {
       join(f.directory, 'irrelevant.txt'),
       'PRIVATE_UNRELATED_DOCUMENT gardening roses.',
     );
-    const generateDraft = vi.fn<DraftProvider['generateDraft']>(
-      async (request) => {
-        const source = request.knowledge!.sources[0]!;
-        return {
-          output: {
-            body: 'I built a TypeScript reporting application.',
-            warnings: [],
-            claims: [
-              {
-                text: 'I built a TypeScript reporting application.',
-                quote: 'I built a TypeScript reporting application.',
-                sourceId: source.id,
-              },
-            ],
-          },
-          metadata: { provider: 'fixture', model: 'fixture' },
-        };
+    const generateDraft = vi.fn<DraftProvider['generateDraft']>(async () => ({
+      output: {
+        body: 'I built a TypeScript reporting application.',
+        warnings: [],
       },
-    );
+      metadata: { provider: 'fixture', model: 'fixture' },
+    }));
     const proposeTools = vi.fn<DraftProvider['proposeTools']>(async () => ({
       calls: [
         {
@@ -366,6 +354,23 @@ describe('knowledge in shared drafting and bounded workflows', () => {
           provider: 'fixture',
           model: 'fixture',
           generateDraft,
+          assessDraft: async (request) => ({
+            output: {
+              units: request.units.map((unit) => ({
+                id: unit.id,
+                category: 'personal_fact',
+                claims: [
+                  {
+                    start: 0,
+                    end: unit.text.length,
+                    sourceId: request.sources[0]?.id ?? null,
+                    quote: request.sources[0]?.excerpt ?? null,
+                  },
+                ],
+              })),
+            },
+            metadata: { provider: 'fixture', model: 'fixture' },
+          }),
           proposeTools,
         },
         logger: {
@@ -442,7 +447,6 @@ describe('knowledge in shared drafting and bounded workflows', () => {
     f.generateDraft.mockResolvedValue({
       output: {
         body: 'I led a global organization serving 100000 users.',
-        claims: [],
         warnings: [],
       },
       metadata: { provider: 'fixture', model: 'fixture' },

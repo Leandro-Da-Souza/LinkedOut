@@ -33,9 +33,9 @@ Two implementation deviations preserve the service architecture. SQLite uses `no
 
 Configuration provides one local user identity and optional interests, audience, tone, language, and writing samples. Explicit request preferences override defaults. Each draft records a profile snapshot and normalized input with `user_provided` origin. This provides lightweight generation provenance, not an evolving memory system or permission to import restricted data.
 
-The drafting handler validates input, reserves an execution, calls the provider outside any database transaction, validates `{ body, warnings }`, and atomically commits the draft and completed execution result. The application assigns IDs, timestamps, user/run IDs, metadata, and `draft` status. Models cannot assign identity, idempotency keys, approvals, or verified external outcomes.
+The drafting handler validates input, reserves an execution, calls the provider outside any database transaction, validates `{ body, warnings }`, independently assesses the immutable body against the same evidence snapshot, verifies proposed evidence links locally, and atomically commits the draft and completed execution result. The application assigns IDs, timestamps, user/run IDs, metadata, and `draft` status. Models cannot assign identity, idempotency keys, approvals, or verified external outcomes.
 
-SQLite uses numbered transactional migrations, parameterized SQL, foreign keys, WAL, and a busy timeout. Its tables hold drafts, runs, and tool executions. Local persistence is not encrypted; operators must protect files and backups.
+SQLite uses numbered transactional migrations, parameterized SQL, foreign keys, WAL, and a busy timeout. Its tables hold drafts, runs, tool executions and separate blocked review artifacts. Valid bodies from rejected or failed assessments are committed atomically with failed execution status. Local persistence is not encrypted; operators must protect files and backups.
 
 Basic idempotency uses a unique reservation associated with normalized request content, profile, model, and generation versions. Agent requests reserve their key before stochastic planning, so matching completed replays do not call the model again. Direct and agent requests share the user/key namespace; reusing a key across modes conflicts. Mismatched input under an existing key conflicts; pending or failed executions require an explicit new-key retry. Draft and its tool result commit together. Advanced leases, distributed locking, and resumption of interrupted workflows are deferred. Completed persistence survives response-delivery failure, but idempotency cannot eliminate uncertain provider billing after network interruption.
 
@@ -45,11 +45,11 @@ The agent accepts a natural-language brief and offers the provider a structured 
 
 The provider interface accepts a list of tool specifications rather than embedding a second drafting implementation. Future workflows can reason about research topics and select registry tools dynamically under runtime allowlists and budgets. A planner never defines its own permissions. No generic orchestration engine, multi-agent loop, vector store, or durable scheduler is introduced now.
 
-The default overall execution deadline is 120 seconds. Provider requests use an explicit 30-second timeout and at most two SDK transport retries within the execution deadline. Cancellation reaches provider calls. Refusals and invalid generated content do not trigger silent draft substitution.
+The default overall execution deadline is 120 seconds. Provider requests use an explicit 30-second timeout and at most two SDK transport retries within the execution deadline. Cancellation reaches both generation and assessment calls. Direct drafting uses two logical calls; agent drafting adds a planning call. Refusals and invalid generated content do not trigger silent draft substitution.
 
 ## Permissions and expansion
 
-Shared tools declare `read_local` or `draft_local` permission requirements. Application composition supplies execution permissions; model arguments cannot grant them. Drafting can incur provider costs and local writes, but no publication approval is needed because no social action exists.
+Shared tools declare `read_local`, `draft_local`, or `delete_local` permission requirements. Application composition supplies execution permissions; model arguments cannot grant them. Drafting can incur provider costs and local writes, but no publication approval is needed because no social action exists.
 
 Before external social actions, add a persistent approval service binding the account, target, exact payload, draft revision, and expiry. A payload edit invalidates approval. Agents and ordinary MCP callers cannot approve themselves. Adapter capability checks must establish product access, scope, policy permission, and permitted data use separately. Ambiguous transmission is an unknown outcome requiring reconciliation, never an automatic successful action or blind retry.
 

@@ -31,6 +31,7 @@ export function createApplication(
           provider: 'openai',
           model: config.model ?? 'unconfigured',
           generateDraft: unavailable,
+          assessDraft: unavailable,
           proposeTools: unavailable,
         });
   const store = new SqliteStore(config.dataDir);

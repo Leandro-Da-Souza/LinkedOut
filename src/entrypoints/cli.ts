@@ -18,9 +18,37 @@ export async function runCli(
   const [group, action, ...rest] = args;
   const context: ExecutionContext = {
     actor: 'cli',
-    permissions: new Set(['read_local', 'draft_local']),
+    permissions: new Set(['read_local', 'draft_local', 'delete_local']),
     ...(signal ? { signal } : {}),
   };
+  if (group === 'artifacts') {
+    if (action === 'list') {
+      const { values, positionals } = readArgs(rest, {
+        limit: { type: 'string' },
+        offset: { type: 'string' },
+      });
+      if (positionals.length) throw usage();
+      return app.tools.invoke(
+        'list_review_artifacts',
+        {
+          ...(values['limit'] !== undefined
+            ? { limit: integerFlag(values['limit']) }
+            : {}),
+          ...(values['offset'] !== undefined
+            ? { offset: integerFlag(values['offset']) }
+            : {}),
+        },
+        context,
+      );
+    }
+    if ((action === 'get' || action === 'delete') && rest.length === 1)
+      return app.tools.invoke(
+        action === 'get' ? 'get_review_artifact' : 'delete_review_artifact',
+        { id: rest[0] },
+        context,
+      );
+    throw usage();
+  }
   if (group === 'knowledge' && action === 'index') {
     if (rest.length) throw usage();
     return app.knowledge.index(signal);
@@ -117,7 +145,7 @@ function integerFlag(value: string): number {
 function usage(): AppError {
   return new AppError(
     'INVALID_INPUT',
-    'Usage: agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
+    'Usage: artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
   );
 }
 

@@ -1,10 +1,11 @@
+import type { ReviewArtifact } from '../domain/assessment.js';
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Draft, ExecutionContext } from '../domain/contracts.js';
-import { AppError } from '../domain/errors.js';
-import type { ErrorCode } from '../domain/errors.js';
+import { AppError, groundingDiagnosticSchema } from '../domain/errors.js';
+import type { ErrorCode, GroundingDiagnostic } from '../domain/errors.js';
 
 export interface Run {
   id: string;
@@ -16,7 +17,9 @@ export interface Run {
   finishedAt: string | null;
   parentRunId: string | null;
   errorCode: ErrorCode | null;
+  groundingDiagnostic: GroundingDiagnostic | null;
   draftId: string | null;
+  reviewArtifactId: string | null;
   planning: unknown;
 }
 
@@ -40,6 +43,16 @@ const migrations = [
   );
   CREATE INDEX drafts_owner_order ON drafts(user_id, created_at DESC, id DESC);
   CREATE INDEX runs_owner_order ON runs(user_id, created_at DESC, id DESC);`,
+  `ALTER TABLE runs ADD COLUMN grounding_diagnostic_json TEXT;
+  ALTER TABLE tool_executions ADD COLUMN grounding_diagnostic_json TEXT;`,
+  `CREATE TABLE review_artifacts (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+    created_at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 1),
+    parent_revision_id TEXT, artifact_json TEXT NOT NULL
+  );
+  CREATE INDEX artifacts_owner_order ON review_artifacts(user_id, created_at DESC, id DESC);
+  ALTER TABLE runs ADD COLUMN review_artifact_id TEXT;
+  ALTER TABLE tool_executions ADD COLUMN review_artifact_id TEXT;`,
 ];
 
 export class SqliteStore {
@@ -167,6 +180,10 @@ export class SqliteStore {
               throw new AppError(
                 'PREVIOUS_FAILURE',
                 'The original request failed. Inspect its run; use a new key for a deliberate retry.',
+                undefined,
+                previous['review_artifact_id']
+                  ? String(previous['review_artifact_id'])
+                  : undefined,
               );
             return {
               runId: String(previous['run_id']),
@@ -232,19 +249,148 @@ export class SqliteStore {
       )
       .run(draftId, runId);
   }
-  failRun(runId: string, code: ErrorCode): void {
+  failRun(
+    runId: string,
+    code: ErrorCode,
+    diagnostic?: GroundingDiagnostic,
+    reviewArtifactId?: string,
+  ): void {
+    this.guarded(() =>
+      this.transaction(() =>
+        this.failRunWithinTransaction(
+          runId,
+          code,
+          diagnostic,
+          reviewArtifactId,
+        ),
+      ),
+    );
+  }
+  private failRunWithinTransaction(
+    runId: string,
+    code: ErrorCode,
+    diagnostic?: GroundingDiagnostic,
+    reviewArtifactId?: string,
+  ): void {
+    // Runtime allowlisting strips extra properties; never serialize arbitrary
+    // errors, rejected text, source IDs, or provider-supplied fields.
+    const parsed = groundingDiagnosticSchema.safeParse(diagnostic);
+    const diagnosticJson =
+      code === 'UNGROUNDED_OUTPUT' && parsed.success
+        ? JSON.stringify(parsed.data)
+        : null;
+    const finishedAt = new Date().toISOString();
+    for (const table of ['runs', 'tool_executions'] as const) {
+      const key = table === 'runs' ? 'id' : 'run_id';
+      this.db
+        .prepare(
+          `UPDATE ${table} SET status = 'failed', ${table === 'runs' ? 'finished_at = ?,' : ''} error_code = ?, grounding_diagnostic_json = ?, review_artifact_id = ? WHERE ${key} = ? AND status = 'running'`,
+        )
+        .run(
+          ...(table === 'runs' ? [finishedAt] : []),
+          code,
+          diagnosticJson,
+          reviewArtifactId ?? null,
+          runId,
+        );
+    }
+  }
+  failWithArtifact(
+    artifact: ReviewArtifact,
+    diagnostic?: GroundingDiagnostic,
+  ): void {
     this.guarded(() =>
       this.transaction(() => {
+        const run = this.db
+          .prepare(
+            "SELECT id FROM runs WHERE id = ? AND user_id = ? AND status = 'running'",
+          )
+          .get(artifact.runId, artifact.userId);
+        if (!run)
+          throw new AppError(
+            'STORAGE_ERROR',
+            'Cannot attach artifact to a completed or missing run.',
+          );
         this.db
           .prepare(
-            "UPDATE runs SET status = 'failed', finished_at = ?, error_code = ? WHERE id = ? AND status = 'running'",
+            'INSERT INTO review_artifacts (id, user_id, run_id, created_at, revision, parent_revision_id, artifact_json) VALUES (?, ?, ?, ?, 1, NULL, ?)',
           )
-          .run(new Date().toISOString(), code, runId);
+          .run(
+            artifact.id,
+            artifact.userId,
+            artifact.runId,
+            artifact.createdAt,
+            JSON.stringify(artifact),
+          );
+        this.failRunWithinTransaction(
+          artifact.runId,
+          artifact.failureCode,
+          diagnostic,
+          artifact.id,
+        );
+      }),
+    );
+  }
+  getReviewArtifact(userId: string, id: string): ReviewArtifact {
+    return this.guarded(() => {
+      const row = this.db
+        .prepare(
+          'SELECT artifact_json FROM review_artifacts WHERE user_id = ? AND id = ?',
+        )
+        .get(userId, id);
+      if (!row)
+        throw new AppError(
+          'NOT_FOUND',
+          'Review artifact not found for the configured user.',
+        );
+      return JSON.parse(String(row['artifact_json'])) as ReviewArtifact;
+    });
+  }
+  listReviewArtifacts(userId: string, limit = 20, offset = 0) {
+    return this.guarded(() => ({
+      artifacts: this.db
+        .prepare(
+          'SELECT id, run_id, created_at, revision FROM review_artifacts WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+        )
+        .all(userId, limit, offset)
+        .map((row) => ({
+          id: String(row['id']),
+          runId: String(row['run_id']),
+          createdAt: String(row['created_at']),
+          revision: Number(row['revision']),
+          status: 'blocked' as const,
+          publishable: false as const,
+        })),
+      total: Number(
         this.db
           .prepare(
-            "UPDATE tool_executions SET status = 'failed', error_code = ? WHERE run_id = ? AND status = 'running'",
+            'SELECT count(*) AS total FROM review_artifacts WHERE user_id = ?',
           )
-          .run(code, runId);
+          .get(userId)?.['total'],
+      ),
+    }));
+  }
+  deleteReviewArtifact(userId: string, id: string): void {
+    this.guarded(() =>
+      this.transaction(() => {
+        const result = this.db
+          .prepare('DELETE FROM review_artifacts WHERE user_id = ? AND id = ?')
+          .run(userId, id);
+        if (!result.changes)
+          throw new AppError(
+            'NOT_FOUND',
+            'Review artifact not found for the configured user.',
+          );
+        this.db
+          .prepare(
+            'UPDATE runs SET review_artifact_id = NULL WHERE user_id = ? AND review_artifact_id = ?',
+          )
+          .run(userId, id);
+        this.db
+          .prepare(
+            'UPDATE tool_executions SET review_artifact_id = NULL WHERE user_id = ? AND review_artifact_id = ?',
+          )
+          .run(userId, id);
       }),
     );
   }
@@ -322,7 +468,13 @@ export class SqliteStore {
       finishedAt: row['finished_at'] as string | null,
       parentRunId: row['parent_run_id'] as string | null,
       errorCode: row['error_code'] as ErrorCode | null,
+      groundingDiagnostic: row['grounding_diagnostic_json']
+        ? groundingDiagnosticSchema.parse(
+            JSON.parse(String(row['grounding_diagnostic_json'])),
+          )
+        : null,
       draftId: row['draft_id'] as string | null,
+      reviewArtifactId: row['review_artifact_id'] as string | null,
       planning: row['planning_json']
         ? (JSON.parse(String(row['planning_json'])) as unknown)
         : null,

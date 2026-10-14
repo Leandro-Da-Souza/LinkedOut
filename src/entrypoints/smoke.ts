@@ -15,6 +15,11 @@ const draftResultSchema = z.object({
     id: z.uuid(),
     body: z.string().min(1),
     status: z.literal('draft'),
+    assessment: z.object({
+      complete: z.literal(true),
+      blocked: z.literal(false),
+      metadata: z.object({ provider: z.string(), model: z.string() }),
+    }),
   }),
 });
 const serverPath = fileURLToPath(new URL('./mcp.js', import.meta.url));

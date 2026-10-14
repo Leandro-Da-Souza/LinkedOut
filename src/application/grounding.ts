@@ -1,5 +1,6 @@
 import type { GeneratedDraft, UserProfile } from '../domain/contracts.js';
 import { AppError } from '../domain/errors.js';
+import type { GroundingDiagnostic } from '../domain/errors.js';
 import type { KnowledgeContext } from '../domain/knowledge.js';
 
 const normalize = (text: string): string => text.replace(/\s+/gu, ' ').trim();
@@ -17,6 +18,10 @@ const projectAction = new RegExp(
 );
 const metric =
   /(?:\d(?:[\d,.]*\d)?\s*(?:%|percent\b|years?\b|months?\b|users?\b|customers?\b|clients?\b|employees?\b|dollars?\b|million\b|billion\b|revenue\b|hours?\b)|[$€£]\s*\d|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million)\s+(?:years?|months?|users?|customers?|clients?|employees?|dollars?|hours?)\b)/iu;
+// A bounded imperative form, not a blanket exemption for sentences containing
+// advice. Anchor the whole sentence so appended accomplishments still fail.
+const keepRunningAdvice =
+  /^\s*Keep the (?:application|app|platform|system) running while (?:new )?components are (?:developed|built)[.!]?\s*$/iu;
 const issueCodes = new Set([
   'MALFORMED_FILE',
   'NO_READABLE_TEXT',
@@ -28,11 +33,12 @@ const issueCodes = new Set([
   'EMPTY_KNOWLEDGE',
 ]);
 
-function reject(): never {
+function reject(diagnostic: GroundingDiagnostic): never {
   // Never interpolate model output, excerpts, filenames, or provider errors.
   throw new AppError(
     'UNGROUNDED_OUTPUT',
     'The generated draft contains unsupported personal claims or invalid evidence links. Revise the brief or provide relevant factual knowledge.',
+    diagnostic,
   );
 }
 
@@ -53,34 +59,45 @@ export function groundDraft(
   void profile;
   const body = normalize(output.body);
   let remaining = body;
-  for (const claim of output.claims) {
+  for (const [index, claim] of output.claims.entries()) {
     const text = normalize(claim.text);
     const quote = normalize(claim.quote);
     const source = context.sources.find((entry) => entry.id === claim.sourceId);
-    if (
-      !source ||
-      text.length < 12 ||
-      quote.length < 12 ||
-      text !== quote ||
-      !normalize(source.excerpt).includes(quote) ||
-      !body.includes(text)
-    ) {
-      reject();
-    }
+    if (!source) reject({ scope: 'claim', reason: 'UNKNOWN_SOURCE', index });
+    if (text.length < 12)
+      reject({ scope: 'claim', reason: 'CLAIM_TOO_SHORT', index });
+    if (quote.length < 12)
+      reject({ scope: 'claim', reason: 'QUOTE_TOO_SHORT', index });
+    if (text !== quote)
+      reject({ scope: 'claim', reason: 'QUOTE_MISMATCH', index });
+    if (!normalize(source.excerpt).includes(quote))
+      reject({ scope: 'claim', reason: 'QUOTE_NOT_IN_SOURCE', index });
+    if (!body.includes(text))
+      reject({ scope: 'claim', reason: 'CLAIM_NOT_IN_BODY', index });
     // Remove only exact attributed spans; adjacent unsupported claims remain.
     remaining = remaining.split(text).join(' ');
   }
 
-  for (const sentence of remaining.split(/(?<=[.!?])\s+|\n+/u)) {
-    if (
-      personalAction.test(sentence) ||
-      personalRole.test(sentence) ||
-      projectAction.test(sentence)
-    ) {
-      reject();
-    }
+  for (const [index, sentence] of remaining
+    .split(/(?<=[.!?])\s+|\n+/u)
+    .entries()) {
+    if (personalAction.test(sentence))
+      reject({
+        scope: 'sentence',
+        reason: 'UNSUPPORTED_PERSONAL_ACTION',
+        index,
+      });
+    if (personalRole.test(sentence))
+      reject({ scope: 'sentence', reason: 'UNSUPPORTED_PERSONAL_ROLE', index });
+    if (projectAction.test(sentence) && !keepRunningAdvice.test(sentence))
+      reject({
+        scope: 'sentence',
+        reason: 'UNSUPPORTED_PROJECT_ACTION',
+        index,
+      });
     // General questions can ask for evidence without asserting its existence.
-    if (!sentence.trim().endsWith('?') && metric.test(sentence)) reject();
+    if (!sentence.trim().endsWith('?') && metric.test(sentence))
+      reject({ scope: 'sentence', reason: 'UNSUPPORTED_METRIC', index });
   }
 
   const limitations = [

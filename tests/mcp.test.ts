@@ -225,9 +225,12 @@ describe('official MCP client over serialized stdio streams', () => {
       });
       const listed = await first.client.listTools();
       expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+        'delete_review_artifact',
         'draft_post',
         'get_draft',
+        'get_review_artifact',
         'list_drafts',
+        'list_review_artifacts',
       ]);
       const input = {
         brief: 'PRIVATE_BRIEF about reliable TypeScript',
@@ -268,7 +271,7 @@ describe('official MCP client over serialized stdio streams', () => {
     } finally {
       await first.close();
     }
-    expect(first.stderr()).toContain('"fixtureRequests":1');
+    expect(first.stderr()).toContain('"fixtureRequests":2');
     for (const secret of [
       'fixture-key-secret',
       'PRIVATE_BRIEF',
@@ -278,7 +281,7 @@ describe('official MCP client over serialized stdio streams', () => {
       expect(first.stderr()).not.toContain(secret);
     const restarted = await connection(env, true);
     try {
-      expect((await restarted.client.listTools()).tools).toHaveLength(3);
+      expect((await restarted.client.listTools()).tools).toHaveLength(6);
       expect(
         body(
           await restarted.client.callTool({
@@ -295,6 +298,81 @@ describe('official MCP client over serialized stdio streams', () => {
       expect(body(unavailable)).toMatchObject({
         error: { code: 'CONFIGURATION_ERROR' },
       });
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('retains blocked bodies privately and retrieves/deletes artifacts after keyless restart', async () => {
+    const { env } = workspace();
+    const first = await connection(env);
+    let artifactId: string;
+    try {
+      const result = await first.client.callTool({
+        name: 'draft_post',
+        arguments: {
+          brief: 'I built PRIVATE_BLOCKED_PROJECT.',
+          idempotencyKey: 'blocked-artifact',
+        },
+      });
+      expect(result.isError).toBe(true);
+      const failure = body(result) as {
+        error: { code: string; reviewArtifactId: string };
+      };
+      expect(failure.error.code).toBe('UNGROUNDED_OUTPUT');
+      artifactId = failure.error.reviewArtifactId;
+      expect(artifactId).toBeTruthy();
+      const summary = await first.client.callTool({
+        name: 'list_review_artifacts',
+        arguments: {},
+      });
+      expect(body(summary)).toMatchObject({
+        total: 1,
+        artifacts: [{ id: artifactId, publishable: false }],
+      });
+      expect(JSON.stringify(summary)).not.toContain('PRIVATE_BLOCKED_PROJECT');
+      expect(
+        body(
+          await first.client.callTool({ name: 'list_drafts', arguments: {} }),
+        ),
+      ).toMatchObject({ total: 0 });
+    } finally {
+      await first.close();
+    }
+    expect(first.stderr()).not.toContain('PRIVATE_BLOCKED_PROJECT');
+    const restarted = await connection(env, true);
+    try {
+      const result = body(
+        await restarted.client.callTool({
+          name: 'get_review_artifact',
+          arguments: { id: artifactId },
+        }),
+      );
+      expect(result).toMatchObject({
+        artifact: {
+          id: artifactId,
+          status: 'blocked',
+          publishable: false,
+          revision: 1,
+          body: expect.stringContaining('PRIVATE_BLOCKED_PROJECT'),
+        },
+      });
+      expect(
+        body(
+          await restarted.client.callTool({
+            name: 'delete_review_artifact',
+            arguments: { id: artifactId },
+          }),
+        ),
+      ).toEqual({ deleted: true });
+      expect(
+        (
+          await restarted.client.callTool({
+            name: 'get_review_artifact',
+            arguments: { id: artifactId },
+          })
+        ).isError,
+      ).toBe(true);
     } finally {
       await restarted.close();
     }
@@ -349,7 +427,7 @@ describe('official MCP client over serialized stdio streams', () => {
       expect(server.client.getProtocolEra()).toBe('modern');
       expect(server.client.getNegotiatedProtocolVersion()).toBe('2026-07-28');
       expect(server.client.getDiscoverResult()).toBeDefined();
-      expect((await server.client.listTools()).tools).toHaveLength(3);
+      expect((await server.client.listTools()).tools).toHaveLength(6);
       expect(
         body(
           await server.client.callTool({
@@ -446,7 +524,7 @@ describe('official MCP client over serialized stdio streams', () => {
       const server = await subprocessConnection(env);
       let id: string;
       try {
-        expect((await server.client.listTools()).tools).toHaveLength(3);
+        expect((await server.client.listTools()).tools).toHaveLength(6);
         const result = body(
           await server.client.callTool({
             name: 'draft_post',

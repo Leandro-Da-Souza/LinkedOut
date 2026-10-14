@@ -33,7 +33,6 @@ function textDraft(
   text = JSON.stringify({
     body: 'Building reliable software takes care.',
     warnings: [],
-    claims: [],
   }),
 ) {
   return message([{ type: 'output_text', text, annotations: [] }]);
@@ -110,7 +109,6 @@ describe('OpenAI provider through real SDK with local HTTP fixtures', () => {
     expect(result.output).toEqual({
       body: 'Building reliable software takes care.',
       warnings: [],
-      claims: [],
     });
     expect(result.metadata).toEqual({
       provider: 'openai',
@@ -136,7 +134,7 @@ describe('OpenAI provider through real SDK with local HTTP fixtures', () => {
     });
   });
 
-  it('serializes selected evidence as untrusted data and requires structured claim links', async () => {
+  it('serializes selected evidence as untrusted data without generation citation metadata', async () => {
     const { provider, requests } = fixture([textDraft()]);
     const knowledge = {
       revision: 'synthetic-revision',
@@ -161,22 +159,10 @@ describe('OpenAI provider through real SDK with local HTTP fixtures', () => {
     const request = requests[0]!;
     const input = request.input as { role: string; content: string }[];
     expect(input[0]!.content).not.toContain('UNTRUSTED_DOCUMENT');
-    expect(input[0]!.content).toContain('untrusted reference data');
-    expect(input[0]!.content).toContain('not independent fact verification');
+    expect(input[0]!.content).toContain('untrusted data');
     expect(JSON.parse(input[1]!.content)).toMatchObject({ knowledge });
     expect(request.text).toMatchObject({
-      format: {
-        schema: {
-          required: expect.arrayContaining(['body', 'warnings', 'claims']),
-          properties: {
-            claims: {
-              items: {
-                required: expect.arrayContaining(['text', 'sourceId', 'quote']),
-              },
-            },
-          },
-        },
-      },
+      format: { schema: { required: ['body', 'warnings'] } },
     });
   });
 
@@ -382,4 +368,39 @@ describe('OpenAI provider through real SDK with local HTTP fixtures', () => {
     ).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
     expect(attempts).toBe(3);
   });
+});
+
+it('assesses finished units with a separate strict schema through the real SDK', async () => {
+  const output = {
+    units: [
+      {
+        id: 'u0',
+        category: 'personal_fact',
+        claims: [
+          {
+            start: 0,
+            end: 24,
+            sourceId: 's1',
+            quote: 'I built a synthetic app.',
+          },
+        ],
+      },
+    ],
+  };
+  const { provider, requests } = fixture([textDraft(JSON.stringify(output))]);
+  const request = {
+    units: [{ id: 'u0', start: 0, end: 24, text: 'I built a synthetic app.' }],
+    sources: [{ id: 's1', excerpt: 'I built a synthetic app.' }],
+  };
+  const result = await provider.assessDraft(request, signal());
+  expect(result.output).toEqual(output);
+  expect(result.metadata.usage).toEqual({ inputTokens: 100, outputTokens: 30 });
+  expect(requests[0]).toMatchObject({
+    store: false,
+    text: { format: { name: 'assessment', strict: true } },
+  });
+  const input = requests[0]!.input as { role: string; content: string }[];
+  expect(input[0]?.content).toContain('untrusted data');
+  expect(input[0]?.content).not.toContain(request.units[0]!.text);
+  expect(JSON.parse(input[1]!.content)).toEqual(request);
 });

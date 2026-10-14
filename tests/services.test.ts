@@ -16,6 +16,7 @@ import type {
 import { AppError } from '../src/domain/errors.js';
 import { createLogger } from '../src/infrastructure/logger.js';
 import { SqliteStore } from '../src/infrastructure/sqlite.js';
+import { rejectionCases } from './fixtures/grounding.js';
 
 // Deliberately injected deterministic provider: no network or live credentials.
 function fakeProvider() {
@@ -46,6 +47,16 @@ function fakeProvider() {
     provider: 'fixture',
     model: 'fixture-model',
     generateDraft,
+    assessDraft: vi.fn<DraftProvider['assessDraft']>(async (request) => ({
+      output: {
+        units: request.units.map((unit) => ({
+          id: unit.id,
+          category: 'advice_opinion_question',
+          claims: [],
+        })),
+      },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    })),
     proposeTools,
   } satisfies DraftProvider;
 }
@@ -105,6 +116,183 @@ function openStore(dir: string): SqliteStore {
 }
 
 describe('shared drafting services with real SQLite', () => {
+  it.each([1, 2])(
+    'migrates version %s history without inventing assessments or changing saved drafts',
+    async (version) => {
+      const f = fixture();
+      const saved = await f.service.create(
+        { brief: 'Synthetic migration check' },
+        context,
+      );
+      const failed = f.store.reserveDraft(
+        'local',
+        'old-failure',
+        {},
+        undefined,
+        context,
+      );
+      f.store.failRun(failed.runId, 'UNGROUNDED_OUTPUT');
+      f.store.close();
+      // Reconstruct the previous schema in an isolated database, retaining rows.
+      const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'));
+      const legacy = { ...saved.draft };
+      delete legacy.assessment;
+      delete legacy.review;
+      legacy.promptVersion = 'draft-v1';
+      db.prepare('UPDATE drafts SET draft_json = ? WHERE id = ?').run(
+        JSON.stringify(legacy),
+        legacy.id,
+      );
+      if (version === 1)
+        db.exec(
+          'ALTER TABLE runs DROP COLUMN grounding_diagnostic_json; ALTER TABLE tool_executions DROP COLUMN grounding_diagnostic_json;',
+        );
+      db.exec(`ALTER TABLE runs DROP COLUMN review_artifact_id;
+      ALTER TABLE tool_executions DROP COLUMN review_artifact_id;
+      DROP TABLE review_artifacts;
+      PRAGMA user_version = ${version};`);
+      db.close();
+      const reopened = openStore(f.dir);
+      expect(reopened.getDraft('local', saved.draft.id)).toEqual(legacy);
+      expect(
+        reopened.getRun('local', saved.draft.runId).groundingDiagnostic,
+      ).toBeNull();
+      expect(reopened.getRun('local', failed.runId)).toMatchObject({
+        errorCode: 'UNGROUNDED_OUTPUT',
+        groundingDiagnostic: null,
+      });
+      const next = reopened.reserveDraft(
+        'local',
+        'new-failure',
+        {},
+        undefined,
+        context,
+      );
+      reopened.failRun(next.runId, 'UNGROUNDED_OUTPUT', {
+        scope: 'claim',
+        reason: 'UNKNOWN_SOURCE',
+        index: 0,
+      });
+      expect(
+        reopened.getRun('local', next.runId).groundingDiagnostic?.reason,
+      ).toBe('UNKNOWN_SOURCE');
+    },
+  );
+
+  it.each(rejectionCases)(
+    'preserves legacy $diagnostic.reason across restart without diagnostic content',
+    async ({ output, diagnostic }) => {
+      const f = fixture();
+      const reserved = f.store.reserveDraft(
+        'local',
+        'legacy',
+        {},
+        undefined,
+        context,
+      );
+      f.store.failRun(reserved.runId, 'UNGROUNDED_OUTPUT', diagnostic);
+      const run = f.store.listRuns('local')[0]!;
+      f.store.close();
+      const reopened = openStore(f.dir);
+      expect(reopened.getRun('local', run.id)).toMatchObject({
+        status: 'failed',
+        errorCode: 'UNGROUNDED_OUTPUT',
+        groundingDiagnostic: diagnostic,
+        draftId: null,
+      });
+      expect(reopened.listRuns('local')[0]?.groundingDiagnostic).toEqual(
+        diagnostic,
+      );
+      expect(reopened.listDrafts('local').total).toBe(0);
+      const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'), {
+        readOnly: true,
+      });
+      try {
+        const row = db
+          .prepare(
+            'SELECT grounding_diagnostic_json FROM tool_executions WHERE run_id = ?',
+          )
+          .get(run.id)!;
+        expect(JSON.parse(String(row['grounding_diagnostic_json']))).toEqual(
+          diagnostic,
+        );
+        expect(
+          JSON.stringify(db.prepare('SELECT * FROM runs').all()),
+        ).not.toContain('PRIVATE_');
+        expect(
+          JSON.stringify(db.prepare('SELECT * FROM tool_executions').all()),
+        ).not.toContain('PRIVATE_');
+      } finally {
+        db.close();
+      }
+      expect(f.logs.join('')).not.toContain('PRIVATE_');
+      expect(f.logs.join('')).not.toContain(output.body);
+    },
+  );
+
+  it('preserves grounding diagnostics on both agent and child runs after restart', async () => {
+    const f = fixture();
+    f.provider.generateDraft.mockResolvedValueOnce({
+      output: {
+        body: 'I built PRIVATE_ACCOMPLISHMENT.',
+        warnings: [],
+      },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    });
+    await expect(
+      f.agent.run({ brief: 'Synthetic diagnostic check' }, context),
+    ).rejects.toMatchObject({ code: 'UNGROUNDED_OUTPUT' });
+    f.store.close();
+    const runs = openStore(f.dir).listRuns('local');
+    expect(runs).toHaveLength(2);
+    for (const run of runs)
+      expect(run.groundingDiagnostic).toEqual({
+        scope: 'sentence',
+        reason: 'UNSUPPORTED_PERSONAL_ACTION',
+        index: 0,
+      });
+    expect(runs.find((run) => run.kind === 'draft')?.parentRunId).toBe(
+      runs.find((run) => run.kind === 'agent')?.id,
+    );
+  });
+
+  it('strips unexpected diagnostic properties at the persistence boundary', () => {
+    const f = fixture();
+    const { runId } = f.store.reserveDraft(
+      'local',
+      'hash',
+      {},
+      undefined,
+      context,
+    );
+    const diagnostic = {
+      scope: 'claim' as const,
+      reason: 'UNKNOWN_SOURCE' as const,
+      index: 0,
+      body: 'PRIVATE_REJECTED_BODY',
+      sourceId: 'PRIVATE_SOURCE',
+    };
+    f.store.failRun(runId, 'UNGROUNDED_OUTPUT', diagnostic);
+    expect(f.store.getRun('local', runId).groundingDiagnostic).toEqual({
+      scope: 'claim',
+      reason: 'UNKNOWN_SOURCE',
+      index: 0,
+    });
+    const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'), {
+      readOnly: true,
+    });
+    try {
+      for (const table of ['runs', 'tool_executions']) {
+        const rows = db
+          .prepare(`SELECT grounding_diagnostic_json FROM ${table}`)
+          .all();
+        expect(JSON.stringify(rows)).not.toContain('PRIVATE_');
+      }
+    } finally {
+      db.close();
+    }
+  });
+
   it('uses preference defaults and persists their snapshot with trusted application metadata', async () => {
     const profile = userProfileSchema.parse({
       id: 'alice',
@@ -123,7 +311,7 @@ describe('shared drafting services with real SQLite', () => {
     expect(result.draft).toMatchObject({
       userId: 'alice',
       status: 'draft',
-      promptVersion: 'draft-v2-knowledge',
+      promptVersion: 'draft-v4-body-only',
       provenance: {
         origin: 'user_provided',
         profile,
@@ -495,6 +683,9 @@ describe('shared drafting services with real SQLite', () => {
       f.provider.generateDraft.mock.calls[0]?.[0].input.writingSamples,
     ).toEqual([malicious]);
     expect(f.registry.all().map((tool) => tool.name)).toEqual([
+      'list_review_artifacts',
+      'get_review_artifact',
+      'delete_review_artifact',
       'draft_post',
       'get_draft',
       'list_drafts',
@@ -670,5 +861,286 @@ describe('bounded agent workflow', () => {
     ).rejects.toMatchObject({ code: 'CANCELLED' });
     expect(f.provider.proposeTools).not.toHaveBeenCalled();
     expect(f.store.listRuns('local')).toEqual([]);
+  });
+});
+
+describe('private review artifacts', () => {
+  const body = 'I built PRIVATE_UNSUPPORTED_APPLICATION.';
+  function rejectedFixture() {
+    const f = fixture();
+    f.provider.generateDraft.mockResolvedValue({
+      output: { body, warnings: [] },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    });
+    return f;
+  }
+  it('retains revision-bound artifacts atomically with failed runs and replays no model calls', async () => {
+    const f = rejectedFixture();
+    const input = {
+      brief: 'Synthetic artifact',
+      idempotencyKey: 'artifact-key',
+    };
+    const error = await f.service
+      .create(input, context)
+      .catch((error) => error as AppError);
+    expect(error).toMatchObject({
+      code: 'UNGROUNDED_OUTPUT',
+      reviewArtifactId: expect.any(String),
+    });
+    const id = (error as AppError).reviewArtifactId!;
+    const artifact = f.store.getReviewArtifact('local', id);
+    expect(artifact).toMatchObject({
+      body,
+      revision: 1,
+      parentRevisionId: null,
+      status: 'blocked',
+      publishable: false,
+      bodyHash: expect.any(String),
+      assessment: { blocked: true },
+    });
+    expect(f.store.listDrafts('local').total).toBe(0);
+    expect(JSON.stringify(f.store.listReviewArtifacts('local'))).not.toContain(
+      body,
+    );
+    expect(f.store.getRun('local', artifact.runId)).toMatchObject({
+      status: 'failed',
+      draftId: null,
+      reviewArtifactId: id,
+    });
+    await expect(f.service.create(input, context)).rejects.toMatchObject({
+      code: 'PREVIOUS_FAILURE',
+    });
+    expect(f.provider.generateDraft).toHaveBeenCalledTimes(1);
+    expect(f.provider.assessDraft).toHaveBeenCalledTimes(1);
+    expect(f.logs.join('')).not.toContain('PRIVATE_');
+    f.store.close();
+    const reopened = openStore(f.dir);
+    expect(reopened.getReviewArtifact('local', id)).toEqual(artifact);
+    expect(() => reopened.getReviewArtifact('other', id)).toThrow('not found');
+    expect(() => reopened.deleteReviewArtifact('other', id)).toThrow(
+      'not found',
+    );
+    reopened.deleteReviewArtifact('local', id);
+    expect(reopened.listReviewArtifacts('local').total).toBe(0);
+    expect(reopened.getRun('local', artifact.runId)).toMatchObject({
+      status: 'failed',
+      reviewArtifactId: null,
+    });
+  });
+  it.each([
+    'PROVIDER_REFUSAL',
+    'PROVIDER_ERROR',
+    'TIMEOUT',
+    'CANCELLED',
+  ] as const)('retains valid bodies on assessment %s', async (code) => {
+    const f = fixture();
+    f.provider.assessDraft.mockRejectedValueOnce(
+      new AppError(code, 'Safe assessment failure.'),
+    );
+    await expect(
+      f.service.create({ brief: 'Synthetic failure' }, context),
+    ).rejects.toMatchObject({ code, reviewArtifactId: expect.any(String) });
+    const id = f.store.listReviewArtifacts('local').artifacts[0]!.id;
+    expect(f.store.getReviewArtifact('local', id)).toMatchObject({
+      failureCode: code,
+      publishable: false,
+    });
+  });
+  it('preserves the body when the shared deadline expires during assessment', async () => {
+    const f = fixture(userProfileSchema.parse({}), 10);
+    f.provider.assessDraft.mockImplementationOnce(async (_request, signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      throw new Error('PRIVATE_RAW_ABORT');
+    });
+    await expect(
+      f.service.create({ brief: 'Deadline' }, context),
+    ).rejects.toMatchObject({
+      code: 'TIMEOUT',
+      reviewArtifactId: expect.any(String),
+    });
+    expect(f.store.listReviewArtifacts('local').total).toBe(1);
+    expect(f.logs.join('')).not.toContain('PRIVATE_RAW_ABORT');
+  });
+  it('preserves the body on caller cancellation during assessment', async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    f.provider.assessDraft.mockImplementationOnce(async () => {
+      controller.abort();
+      throw new Error('PRIVATE_RAW_ABORT');
+    });
+    await expect(
+      f.service.create(
+        { brief: 'Cancellation' },
+        { ...context, signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({
+      code: 'CANCELLED',
+      reviewArtifactId: expect.any(String),
+    });
+    expect(f.store.listReviewArtifacts('local').total).toBe(1);
+  });
+  it('keeps the child artifact reference when agent cancellation propagates', async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    f.provider.assessDraft.mockImplementationOnce(async () => {
+      controller.abort();
+      throw new Error('PRIVATE_ABORT');
+    });
+    await expect(
+      f.agent.run(
+        { brief: 'Agent cancellation' },
+        { ...context, signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({
+      code: 'CANCELLED',
+      reviewArtifactId: expect.any(String),
+    });
+    const id = f.store.listReviewArtifacts('local').artifacts[0]!.id;
+    const runs = f.store.listRuns('local');
+    expect(runs).toHaveLength(2);
+    expect(
+      runs.every(
+        (run) =>
+          run.status === 'failed' &&
+          run.errorCode === 'CANCELLED' &&
+          run.reviewArtifactId === id,
+      ),
+    ).toBe(true);
+  });
+  it('blocks malformed assessment and never persists arbitrary assessor output', async () => {
+    const f = fixture();
+    f.provider.assessDraft.mockResolvedValueOnce({
+      output: { injected: 'PRIVATE_RAW_RESPONSE' },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    });
+    await expect(
+      f.service.create({ brief: 'Synthetic failure' }, context),
+    ).rejects.toMatchObject({ code: 'UNGROUNDED_OUTPUT' });
+    const artifact = f.store.getReviewArtifact(
+      'local',
+      f.store.listReviewArtifacts('local').artifacts[0]!.id,
+    );
+    expect(artifact.assessment?.issues).toContain('INVALID_ASSESSMENT');
+    expect(JSON.stringify(artifact)).not.toContain('PRIVATE_RAW_RESPONSE');
+  });
+  it('retains a valid body when ancillary generation fields fail validation', async () => {
+    const f = fixture();
+    f.provider.generateDraft.mockResolvedValueOnce({
+      output: {
+        body: 'A bounded synthetic body.',
+        warnings: ['x'.repeat(1001)],
+        injected: 'PRIVATE_RAW_FIELD',
+      },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    });
+    await expect(
+      f.service.create({ brief: 'Invalid ancillary fields' }, context),
+    ).rejects.toMatchObject({
+      code: 'INVALID_OUTPUT',
+      reviewArtifactId: expect.any(String),
+    });
+    const artifact = f.store.getReviewArtifact(
+      'local',
+      f.store.listReviewArtifacts('local').artifacts[0]!.id,
+    );
+    expect(artifact.body).toBe('A bounded synthetic body.');
+    expect(JSON.stringify(artifact)).not.toContain('PRIVATE_RAW_FIELD');
+    expect(f.provider.assessDraft).not.toHaveBeenCalled();
+  });
+  it('has no artifact when generation yields no valid body', async () => {
+    const f = fixture();
+    f.provider.generateDraft.mockResolvedValueOnce({
+      output: { body: '', warnings: [] },
+      metadata: { provider: 'fixture', model: 'fixture-model' },
+    });
+    await expect(
+      f.service.create({ brief: 'Invalid body' }, context),
+    ).rejects.toMatchObject({ code: 'INVALID_OUTPUT' });
+    expect(f.store.listReviewArtifacts('local').total).toBe(0);
+    expect(f.provider.assessDraft).not.toHaveBeenCalled();
+  });
+  it('rolls artifact insertion back if the failed-run update fails', async () => {
+    const f = rejectedFixture();
+    const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'));
+    db.exec(
+      "CREATE TRIGGER fail_artifact_commit BEFORE UPDATE ON runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+    );
+    try {
+      const error = await f.service
+        .create({ brief: 'Rollback' }, context)
+        .catch((error) => error as AppError);
+      expect(error).not.toHaveProperty('reviewArtifactId', expect.any(String));
+      expect(f.store.listReviewArtifacts('local').total).toBe(0);
+      expect(f.store.listRuns('local')[0]?.status).toBe('running');
+    } finally {
+      db.close();
+    }
+  });
+  it('propagates one artifact to parent and child and clears both references on deletion', async () => {
+    const f = rejectedFixture();
+    await expect(
+      f.agent.run({ brief: 'Artifact parent' }, context),
+    ).rejects.toMatchObject({ code: 'UNGROUNDED_OUTPUT' });
+    const id = f.store.listReviewArtifacts('local').artifacts[0]!.id;
+    expect(
+      f.store
+        .listRuns('local')
+        .every((run) => run.status === 'failed' && run.reviewArtifactId === id),
+    ).toBe(true);
+    await expect(
+      f.registry.invoke('delete_review_artifact', { id }, context),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await f.registry.invoke(
+      'delete_review_artifact',
+      { id },
+      { ...context, permissions: new Set(['delete_local']) },
+    );
+    expect(
+      f.store.listRuns('local').every((run) => run.reviewArtifactId === null),
+    ).toBe(true);
+    expect(() => f.registry.specs(['get_review_artifact'])).toThrow(
+      'not available',
+    );
+  });
+  it('isolates evidence and body from provider mutation and omits profile and paths in assessment', async () => {
+    const f = fixture();
+    const knowledge = {
+      revision: 'synthetic',
+      issues: [],
+      sources: [
+        {
+          id: 's',
+          documentId: 'd',
+          path: 'PRIVATE_PATH',
+          contentHash: 'hash',
+          excerpt: 'Synthetic reference.',
+          page: null,
+          startLine: 1,
+        },
+      ],
+    };
+    f.provider.generateDraft.mockImplementationOnce(async (request) => {
+      request.knowledge!.sources[0]!.excerpt = 'Mutated';
+      return {
+        output: { body: 'Consider testing carefully.', warnings: [] },
+        metadata: { provider: 'fixture', model: 'fixture-model' },
+      };
+    });
+    const result = await f.service.create(
+      { brief: 'Synthetic mutation' },
+      { ...context, knowledge },
+    );
+    expect(result.draft.provenance.knowledge).toEqual(knowledge);
+    expect(f.provider.assessDraft.mock.calls[0]?.[0].sources).toEqual([
+      { id: 's', excerpt: 'Synthetic reference.' },
+    ]);
+    expect(
+      JSON.stringify(f.provider.assessDraft.mock.calls[0]?.[0]),
+    ).not.toContain('PRIVATE_PATH');
+    expect(f.provider.assessDraft.mock.calls[0]?.[0]).not.toHaveProperty(
+      'profile',
+    );
   });
 });

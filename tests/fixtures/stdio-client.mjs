@@ -59,7 +59,14 @@ try {
   });
   assert.deepEqual(
     (await client.listTools()).tools.map((tool) => tool.name).sort(),
-    ['draft_post', 'get_draft', 'list_drafts'],
+    [
+      'delete_review_artifact',
+      'draft_post',
+      'get_draft',
+      'get_review_artifact',
+      'list_drafts',
+      'list_review_artifacts',
+    ],
   );
   let draft;
   if (process.env.LINKEDOUT_TEST_DRAFT_ID) {
@@ -91,6 +98,44 @@ try {
         }),
       ).draft.id,
       draft.id,
+    );
+  }
+  if (!process.env.LINKEDOUT_TEST_DRAFT_ID) {
+    const failed = await client.callTool({
+      name: 'draft_post',
+      arguments: {
+        brief: 'I built PRIVATE_BLOCKED_SHELL_PROJECT.',
+        idempotencyKey: 'shell-blocked',
+      },
+    });
+    assert.equal(failed.isError, true);
+    const failure = JSON.parse(
+      failed.content.find((item) => item.type === 'text').text,
+    ).error;
+    assert.equal(failure.code, 'UNGROUNDED_OUTPUT');
+    const id = failure.reviewArtifactId;
+    assert.ok(id);
+    const summaries = body(
+      await client.callTool({ name: 'list_review_artifacts', arguments: {} }),
+    );
+    assert.equal(summaries.total, 1);
+    assert.ok(
+      !JSON.stringify(summaries).includes('PRIVATE_BLOCKED_SHELL_PROJECT'),
+    );
+    const artifact = body(
+      await client.callTool({ name: 'get_review_artifact', arguments: { id } }),
+    ).artifact;
+    assert.equal(artifact.publishable, false);
+    assert.equal(artifact.status, 'blocked');
+    assert.ok(artifact.body.includes('PRIVATE_BLOCKED_SHELL_PROJECT'));
+    assert.equal(
+      body(
+        await client.callTool({
+          name: 'delete_review_artifact',
+          arguments: { id },
+        }),
+      ).deleted,
+      true,
     );
   }
   assert.equal(draft.status, 'draft');

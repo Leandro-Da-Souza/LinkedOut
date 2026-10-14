@@ -14,7 +14,7 @@ import type { SqliteStore } from '../infrastructure/sqlite.js';
 import type { Logger } from '../infrastructure/logger.js';
 import type { ToolRegistry } from './tools.js';
 import { createHash } from 'node:crypto';
-import { PROMPT_VERSION } from './drafting.js';
+import { PIPELINE_VERSION } from './drafting.js';
 import { EMPTY_KNOWLEDGE } from '../domain/knowledge.js';
 import type { KnowledgeReader } from '../domain/knowledge.js';
 
@@ -53,7 +53,7 @@ export class AgentWorkflow {
       provider: this.provider.provider,
       model: this.provider.model,
       workflowVersion: 'agent-v1',
-      promptVersion: PROMPT_VERSION,
+      promptVersion: PIPELINE_VERSION,
       knowledge,
     };
     // Caller key is not part of semantic input, and is never assigned by the model.
@@ -128,11 +128,22 @@ export class AgentWorkflow {
         try {
           checkAbort(signal);
         } catch (abort) {
-          safe = publicError(abort);
+          const cancelled = publicError(abort);
+          safe = new AppError(
+            cancelled.code,
+            cancelled.message,
+            safe.groundingDiagnostic,
+            safe.reviewArtifactId,
+          );
         }
       }
       try {
-        this.store.failRun(runId, safe.code);
+        this.store.failRun(
+          runId,
+          safe.code,
+          safe.groundingDiagnostic,
+          safe.reviewArtifactId,
+        );
       } catch {
         /* Preserve original failure. */
       }

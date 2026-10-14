@@ -5,6 +5,7 @@ import type { GeneratedDraft } from '../src/domain/contracts.js';
 import { AppError } from '../src/domain/errors.js';
 import { EMPTY_KNOWLEDGE } from '../src/domain/knowledge.js';
 import type { KnowledgeContext } from '../src/domain/knowledge.js';
+import { diagnosticKnowledge, rejectionCases } from './fixtures/grounding.js';
 
 const profile = userProfileSchema.parse({});
 const quote = 'I built a TypeScript reporting application.';
@@ -42,6 +43,138 @@ function expectRejected(output: GeneratedDraft, knowledge = context): void {
 }
 
 describe('conservative factual grounding', () => {
+  it.each([
+    ['paraphrased body', 'I developed a reporting platform using TypeScript.'],
+    ['omitted quotation', 'Thoughtful reporting matters.'],
+    ['internal Markdown', 'I built a **TypeScript** reporting application.'],
+    ['changed punctuation', 'I built a TypeScript reporting application!'],
+    [
+      'noncontiguous quotation',
+      'I built a useful TypeScript reporting application.',
+    ],
+    ['changed case', 'I built a typescript reporting application.'],
+  ])(
+    'rejects a valid source quotation absent from the body: %s',
+    (_name, body) => {
+      expect(() =>
+        groundDraft(draft(body, [claim()]), context, profile),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'UNGROUNDED_OUTPUT',
+          groundingDiagnostic: {
+            scope: 'claim',
+            reason: 'CLAIM_NOT_IN_BODY',
+            index: 0,
+          },
+        }),
+      );
+    },
+  );
+
+  it.each([
+    `“${quote}”`,
+    `**${quote}**`,
+    `> ${quote}`,
+    'I built a\nTypeScript\t reporting application.',
+  ])(
+    'accepts surrounding formatting and whitespace without rewriting evidence: %s',
+    (body) => {
+      expect(
+        groundDraft(draft(body, [claim()]), context, profile).review.grounding,
+      ).toBe('evidence_linked');
+    },
+  );
+
+  it('rejects removal of source backticks inside an otherwise faithful body quotation', () => {
+    const text = 'Communication used custom events and `postMessage`.';
+    const knowledge = {
+      ...context,
+      sources: [{ ...context.sources[0]!, excerpt: text }],
+    };
+    expect(() =>
+      groundDraft(
+        draft(text.replaceAll('`', ''), [claim(text)]),
+        knowledge,
+        profile,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        groundingDiagnostic: {
+          scope: 'claim',
+          reason: 'CLAIM_NOT_IN_BODY',
+          index: 0,
+        },
+      }),
+    );
+  });
+
+  it.each([
+    [
+      'QUOTE_MISMATCH',
+      'I developed a reporting platform using TypeScript.',
+      claim(
+        'I developed a reporting platform using TypeScript.',
+        'source-1',
+        quote,
+      ),
+    ],
+    [
+      'QUOTE_NOT_IN_SOURCE',
+      'I developed a reporting platform using TypeScript.',
+      claim('I developed a reporting platform using TypeScript.'),
+    ],
+    ['UNKNOWN_SOURCE', quote, claim(quote, 'document-1')],
+  ] as const)('rejects inconsistent metadata with %s', (reason, body, link) => {
+    expect(() => groundDraft(draft(body, [link]), context, profile)).toThrow(
+      expect.objectContaining({
+        groundingDiagnostic: { scope: 'claim', reason, index: 0 },
+      }),
+    );
+  });
+
+  it.each(rejectionCases)(
+    'reports $diagnostic.reason with its position',
+    ({ output, diagnostic }) => {
+      try {
+        groundDraft(output, diagnosticKnowledge, profile);
+        expect.unreachable('Expected grounding rejection');
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: 'UNGROUNDED_OUTPUT',
+          groundingDiagnostic: diagnostic,
+        });
+        expect(JSON.stringify(error)).not.toContain('PRIVATE_');
+      }
+    },
+  );
+
+  it.each([
+    'Keep the application running while new components are developed',
+    'Keep the application running while new components are developed.',
+    'Keep the system running while components are built.',
+  ])('accepts bounded technical advice: %s', (body) => {
+    expect(
+      groundDraft(draft(body), EMPTY_KNOWLEDGE, profile).review.grounding,
+    ).toBe('no_personal_claims');
+  });
+
+  it.each([
+    'Keep the application running while new components are developed. I built the integration.',
+    'Keep the application running while new components are developed and our team saved weeks.',
+    'Keep the application running while new components are developed. The application reduced costs.',
+    'Keep the application running while new components are developed, saving 500 hours.',
+    'The application was developed by our team.',
+    'Our application delivered substantial savings.',
+  ])('still rejects accomplishments alongside advice: %s', (body) => {
+    expectRejected(draft(body));
+  });
+
+  it('does not exempt advice from quotation validation', () => {
+    const advice =
+      'Keep the application running while new components are developed.';
+    expectRejected(draft(advice, [claim(advice)]));
+  });
+
   it('accepts an exact attributed source span and always requires human review', () => {
     const result = groundDraft(draft(quote, [claim()]), context, profile);
     expect(result.output.claims).toEqual([claim()]);

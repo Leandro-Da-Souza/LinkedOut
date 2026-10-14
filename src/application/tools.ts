@@ -75,9 +75,46 @@ export function createTools(
 ): ToolRegistry {
   return new ToolRegistry([
     {
+      name: 'list_review_artifacts',
+      description:
+        'List private blocked review artifact summaries; never publication-ready.',
+      permission: 'read_local',
+      inputSchema: listDraftsSchema,
+      readOnly: true,
+      execute: async (input) => {
+        const { limit, offset } = parseInput(listDraftsSchema, input);
+        return store.listReviewArtifacts(profile.id, limit, offset);
+      },
+    },
+    {
+      name: 'get_review_artifact',
+      description:
+        'Explicitly retrieve a private non-publishable body and its assessment evidence.',
+      permission: 'read_local',
+      inputSchema: getDraftSchema,
+      readOnly: true,
+      execute: async (input) => {
+        const { id } = parseInput(getDraftSchema, input);
+        return { artifact: store.getReviewArtifact(profile.id, id) };
+      },
+    },
+    {
+      name: 'delete_review_artifact',
+      description:
+        'Delete one private review artifact; preserves safe run history and existing request snapshots.',
+      permission: 'delete_local',
+      inputSchema: getDraftSchema,
+      readOnly: false,
+      execute: async (input) => {
+        const { id } = parseInput(getDraftSchema, input);
+        store.deleteReviewArtifact(profile.id, id);
+        return { deleted: true };
+      },
+    },
+    {
       name: 'draft_post',
       description:
-        'Generate and persist one LinkedIn draft from user-provided information. Costs one bounded LLM operation; does not research or publish.',
+        'Generate and persist one LinkedIn draft from user-provided information. Costs two bounded LLM operations; does not research or publish.',
       permission: 'draft_local',
       inputSchema: draftInputSchema,
       plannerSchema: plannedDraftSchema,

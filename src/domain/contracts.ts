@@ -45,14 +45,12 @@ export type DraftInput = z.infer<typeof draftInputSchema>;
 export const generatedDraftWireSchema = z.strictObject({
   body: z.string(),
   warnings: z.array(z.string()),
-  claims: z.array(
-    z.strictObject({
-      text: z.string(),
-      sourceId: z.string(),
-      quote: z.string(),
-    }),
-  ),
 });
+export const generatedBodySchema = z.strictObject({
+  body: z.string().trim().min(1).max(3000),
+  warnings: z.array(z.string().trim().min(1).max(1000)).max(10),
+});
+export type GeneratedBody = z.infer<typeof generatedBodySchema>;
 export const generatedDraftSchema = z.strictObject({
   body: z.string().trim().min(1).max(3000),
   warnings: z.array(z.string().trim().min(1).max(1000)).max(10),
@@ -106,6 +104,7 @@ export interface Draft extends GeneratedDraft {
     limitations: string[];
   };
   generation: ModelMetadata;
+  assessment?: import('./assessment.js').AssessmentReport;
 }
 export interface DraftResult {
   draft: Draft;
@@ -128,6 +127,10 @@ export interface DraftProvider {
     request: GenerationRequest,
     signal: AbortSignal,
   ): Promise<{ output: unknown; metadata: ModelMetadata }>;
+  assessDraft(
+    request: import('./assessment.js').AssessmentRequest,
+    signal: AbortSignal,
+  ): Promise<{ output: unknown; metadata: ModelMetadata }>;
   proposeTools(
     brief: string,
     profile: UserProfile,
@@ -135,7 +138,7 @@ export interface DraftProvider {
     signal: AbortSignal,
   ): Promise<{ calls: ProposedCall[]; metadata: ModelMetadata }>;
 }
-export type Permission = 'read_local' | 'draft_local';
+export type Permission = 'read_local' | 'draft_local' | 'delete_local';
 export interface ExecutionContext {
   actor: 'mcp' | 'cli' | 'agent' | 'smoke' | 'test';
   permissions: ReadonlySet<Permission>;

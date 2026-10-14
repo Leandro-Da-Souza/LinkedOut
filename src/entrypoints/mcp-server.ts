@@ -23,9 +23,9 @@ export function createMcpServer(
         inputSchema: tool.inputSchema,
         annotations: {
           readOnlyHint: tool.readOnly,
-          destructiveHint: false,
+          destructiveHint: tool.permission === 'delete_local',
           idempotentHint: tool.readOnly,
-          openWorldHint: !tool.readOnly,
+          openWorldHint: tool.name === 'draft_post',
         },
       },
       async (input, ctx) => {
@@ -33,7 +33,11 @@ export function createMcpServer(
           try {
             const result = await app.tools.invoke(tool.name, input, {
               actor: 'mcp',
-              permissions: new Set(['read_local', 'draft_local']),
+              permissions: new Set([
+                'read_local',
+                'draft_local',
+                'delete_local',
+              ]),
               signal: AbortSignal.any([ctx.mcpReq.signal, shutdownSignal]),
             });
             return {
@@ -50,7 +54,13 @@ export function createMcpServer(
                 {
                   type: 'text' as const,
                   text: JSON.stringify({
-                    error: { code: safe.code, message: safe.message },
+                    error: {
+                      code: safe.code,
+                      message: safe.message,
+                      ...(safe.reviewArtifactId
+                        ? { reviewArtifactId: safe.reviewArtifactId }
+                        : {}),
+                    },
                   }),
                 },
               ],

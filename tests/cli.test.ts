@@ -75,6 +75,54 @@ function cli(env: Record<string, string>, args: string[], production = false) {
 }
 
 describe('CLI and agent subprocesses', () => {
+  it('exposes safe grounding diagnostics through list and get in new processes', () => {
+    const env = workspace();
+    // The injected fixture echoes the brief into its synthetic output.
+    const failed = cli(env, [
+      'drafts',
+      'create',
+      '--brief',
+      'I built PRIVATE_PROJECT.',
+    ]);
+    expect(failed.status, failed.stderr).toBe(1);
+    expect(failed.stderr).toContain('UNGROUNDED_OUTPUT');
+    expect(failed.stderr).not.toContain('PRIVATE_PROJECT');
+    const listed = cli(env, ['runs', 'list'], true);
+    expect(listed.status, listed.stderr).toBe(0);
+    const run = JSON.parse(listed.stdout).runs[0];
+    const diagnostic = {
+      scope: 'sentence',
+      reason: 'UNSUPPORTED_PERSONAL_ACTION',
+      index: 0,
+    };
+    expect(run.groundingDiagnostic).toEqual(diagnostic);
+    const read = cli(env, ['runs', 'get', run.id], true);
+    expect(read.status, read.stderr).toBe(0);
+    expect(JSON.parse(read.stdout).run.groundingDiagnostic).toEqual(diagnostic);
+    expect(listed.stdout + read.stdout).not.toContain('PRIVATE_PROJECT');
+    const artifacts = cli(env, ['artifacts', 'list'], true);
+    const summary = JSON.parse(artifacts.stdout);
+    expect(summary).toMatchObject({
+      total: 1,
+      artifacts: [{ id: run.reviewArtifactId, publishable: false }],
+    });
+    expect(artifacts.stdout).not.toContain('PRIVATE_PROJECT');
+    const artifact = cli(env, ['artifacts', 'get', run.reviewArtifactId], true);
+    expect(JSON.parse(artifact.stdout)).toMatchObject({
+      artifact: {
+        publishable: false,
+        body: expect.stringContaining('PRIVATE_PROJECT'),
+      },
+    });
+    expect(
+      cli(env, ['artifacts', 'delete', run.reviewArtifactId], true).status,
+    ).toBe(0);
+    expect(
+      JSON.parse(cli(env, ['runs', 'get', run.id], true).stdout).run
+        .reviewArtifactId,
+    ).toBeNull();
+  });
+
   it('indexes and searches private knowledge without credentials and passes evidence into the agent', () => {
     const env = workspace();
     mkdirSync(env.LINKEDOUT_KNOWLEDGE_DIR!);
@@ -142,7 +190,7 @@ describe('CLI and agent subprocesses', () => {
     expect(saved.draft.provenance.input.brief).toBe(
       'PRIVATE_BRIEF about testing',
     );
-    expect(first.stderr).toContain('"fixtureRequests":2');
+    expect(first.stderr).toContain('"fixtureRequests":3');
     expect(first.stderr).not.toContain('PRIVATE_BRIEF');
     expect(first.stderr).not.toContain('fixture-key-secret');
     expect(first.stderr).not.toContain(saved.draft.body);
@@ -176,7 +224,7 @@ describe('CLI and agent subprocesses', () => {
     expect(result.status, result.stderr).toBe(0);
     const saved = JSON.parse(result.stdout) as DraftResult;
     expect(saved.draft.body).toContain('Warm; Swedish');
-    expect(result.stderr).toContain('"fixtureRequests":1');
+    expect(result.stderr).toContain('"fixtureRequests":2');
     const read = cli(env, ['drafts', 'get', saved.draft.id], true);
     expect(JSON.parse(read.stdout)).toMatchObject({ draft: saved.draft });
   });

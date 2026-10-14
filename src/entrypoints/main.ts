@@ -9,7 +9,7 @@ export function isMain(url: string): boolean {
 export function reportFailure(error: unknown): void {
   const safe = publicError(error);
   process.stderr.write(
-    `${JSON.stringify({ error: { code: safe.code, message: safe.message } })}\n`,
+    `${JSON.stringify({ error: { code: safe.code, message: safe.message, ...(safe.reviewArtifactId ? { reviewArtifactId: safe.reviewArtifactId } : {}) } })}\n`,
   );
   process.exitCode = 1;
 }

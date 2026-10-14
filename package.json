@@ -18,6 +18,7 @@
     "mcp": "node --env-file-if-exists=.env dist/entrypoints/mcp.js",
     "agent": "node --env-file-if-exists=.env dist/entrypoints/cli.js agent",
     "drafts": "node --env-file-if-exists=.env dist/entrypoints/cli.js drafts",
+    "artifacts": "node --env-file-if-exists=.env dist/entrypoints/cli.js artifacts",
     "runs": "node --env-file-if-exists=.env dist/entrypoints/cli.js runs",
     "knowledge": "node --env-file-if-exists=.env dist/entrypoints/cli.js knowledge",
     "smoke:live": "npm run build && node --env-file-if-exists=.env dist/entrypoints/smoke.js"

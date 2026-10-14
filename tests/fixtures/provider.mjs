@@ -63,6 +63,28 @@ export function fixtureProvider(options = {}) {
           }),
         },
       ];
+    } else if (data.units) {
+      output = [
+        {
+          type: 'message',
+          id: 'msg_assessment',
+          role: 'assistant',
+          status: 'completed',
+          content: [
+            {
+              type: 'output_text',
+              annotations: [],
+              text: JSON.stringify({
+                units: data.units.map((unit) => ({
+                  id: unit.id,
+                  category: 'advice_opinion_question',
+                  claims: [],
+                })),
+              }),
+            },
+          ],
+        },
+      ];
     } else {
       const tone = data.input.tone ?? data.profile.tone;
       const language = data.input.language ?? data.profile.language;
@@ -79,7 +101,6 @@ export function fixtureProvider(options = {}) {
               text: JSON.stringify({
                 body: `Draft for ${data.profile.name ?? 'local user'}: ${data.input.brief} (${tone}; ${language})`,
                 warnings: [],
-                claims: [],
               }),
             },
           ],
