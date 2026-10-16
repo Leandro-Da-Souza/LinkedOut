@@ -1,3 +1,10 @@
+import {
+  RESEARCH_SOURCES,
+  researchInputSchema,
+  reviewIdeaSchema,
+  listIdeasSchema,
+} from '../domain/research.js';
+import type { ResearchWorkflow } from './research.js';
 import { z } from 'zod';
 import type {
   ExecutionContext,
@@ -23,6 +30,7 @@ export interface RegisteredTool {
   inputSchema: z.ZodType;
   plannerSchema?: z.ZodType;
   readOnly: boolean;
+  openWorld?: boolean;
   execute(input: unknown, context: ExecutionContext): Promise<unknown>;
 }
 
@@ -72,8 +80,120 @@ export function createTools(
   service: DraftService,
   store: SqliteStore,
   profile: UserProfile,
+  research?: ResearchWorkflow,
 ): ToolRegistry {
+  const researchTools: RegisteredTool[] = research
+    ? [
+        {
+          name: 'research_run',
+          description:
+            'Discover public releases and persist up to five review-required ideas. One bounded model call. A keyed replay returns historical evidence without refreshing.',
+          permission: 'research_local',
+          inputSchema: researchInputSchema,
+          readOnly: false,
+          openWorld: true,
+          execute: (input, context) => research.run(input, context),
+        },
+        {
+          name: 'list_research_sources',
+          description:
+            'Inspect configured public research sources and usage policies.',
+          permission: 'read_local',
+          inputSchema: z.strictObject({}),
+          readOnly: true,
+          execute: async () => ({ sources: RESEARCH_SOURCES }),
+        },
+        {
+          name: 'list_research_items',
+          description: 'List public research summaries.',
+          permission: 'read_local',
+          inputSchema: listDraftsSchema,
+          readOnly: true,
+          execute: async (input) => {
+            const { limit, offset } = parseInput(listDraftsSchema, input);
+            return {
+              items: store.listResearchItems(profile.id, limit, offset),
+              limit,
+              offset,
+            };
+          },
+        },
+        {
+          name: 'get_research_item',
+          description: 'Inspect one public research item and provenance.',
+          permission: 'read_local',
+          inputSchema: getDraftSchema,
+          readOnly: true,
+          execute: async (input) => ({
+            item: store.getResearchItem(
+              profile.id,
+              parseInput(getDraftSchema, input).id,
+            ),
+          }),
+        },
+        {
+          name: 'list_content_ideas',
+          description: 'List content ideas with current editorial decisions.',
+          permission: 'read_local',
+          inputSchema: listIdeasSchema,
+          readOnly: true,
+          execute: async (input) => {
+            const { limit, offset, status } = parseInput(
+              listIdeasSchema,
+              input,
+            );
+            return {
+              ideas: store.listIdeas(profile.id, limit, offset, status),
+              limit,
+              offset,
+            };
+          },
+        },
+        {
+          name: 'get_content_idea',
+          description:
+            'Inspect an idea and its separate public and private evidence.',
+          permission: 'read_local',
+          inputSchema: getDraftSchema,
+          readOnly: true,
+          execute: async (input) => ({
+            idea: store.getIdea(
+              profile.id,
+              parseInput(getDraftSchema, input).id,
+            ),
+          }),
+        },
+        {
+          name: 'review_content_idea',
+          description:
+            'Record a local editorial decision; acceptance never grants publication approval.',
+          permission: 'review_local',
+          inputSchema: reviewIdeaSchema,
+          readOnly: false,
+          execute: async (input) => {
+            const { id, status } = parseInput(reviewIdeaSchema, input);
+            return { idea: store.reviewIdea(profile.id, id, status) };
+          },
+        },
+        {
+          name: 'delete_research_run',
+          description:
+            'Delete a completed research run payload and its ideas. Retain safe history and key tombstone. Does not erase backups.',
+          permission: 'delete_local',
+          inputSchema: getDraftSchema,
+          readOnly: false,
+          execute: async (input) => {
+            store.deleteResearchRun(
+              profile.id,
+              parseInput(getDraftSchema, input).id,
+            );
+            return { deleted: true };
+          },
+        },
+      ]
+    : [];
   return new ToolRegistry([
+    ...researchTools,
     {
       name: 'list_review_artifacts',
       description:
@@ -113,6 +233,7 @@ export function createTools(
     },
     {
       name: 'draft_post',
+      openWorld: true,
       description:
         'Generate and persist one LinkedIn draft from user-provided information. Costs two bounded LLM operations; does not research or publish.',
       permission: 'draft_local',

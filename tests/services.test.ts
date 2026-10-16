@@ -203,7 +203,7 @@ describe('shared drafting services with real SQLite', () => {
     expect(reopened.getReviewArtifact('local', artifact.id)).toEqual(artifact);
   });
 
-  it.each([1, 2])(
+  it.each([1, 2, 3])(
     'migrates version %s history without inventing assessments or changing saved drafts',
     async (version) => {
       const f = fixture();
@@ -230,14 +230,23 @@ describe('shared drafting services with real SQLite', () => {
         JSON.stringify(legacy),
         legacy.id,
       );
+      db.exec(`DROP TABLE idea_reviews;
+      DROP TABLE content_ideas;
+      DROP TABLE research_results;
+      DROP TABLE research_run_items;
+      DROP TABLE research_items;
+      DROP TABLE research_cache;
+      ALTER TABLE runs DROP COLUMN research_result_id;
+      ALTER TABLE tool_executions DROP COLUMN research_result_id;`);
       if (version === 1)
         db.exec(
           'ALTER TABLE runs DROP COLUMN grounding_diagnostic_json; ALTER TABLE tool_executions DROP COLUMN grounding_diagnostic_json;',
         );
-      db.exec(`ALTER TABLE runs DROP COLUMN review_artifact_id;
+      if (version < 3)
+        db.exec(`ALTER TABLE runs DROP COLUMN review_artifact_id;
       ALTER TABLE tool_executions DROP COLUMN review_artifact_id;
-      DROP TABLE review_artifacts;
-      PRAGMA user_version = ${version};`);
+      DROP TABLE review_artifacts;`);
+      db.exec(`PRAGMA user_version = ${version};`);
       db.close();
       const reopened = openStore(f.dir);
       expect(reopened.getDraft('local', saved.draft.id)).toEqual(legacy);

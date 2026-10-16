@@ -397,3 +397,104 @@ it('assesses finished units with a separate strict schema through the real SDK',
   expect(input[0]?.content).not.toContain(request.units[0]!.text);
   expect(JSON.parse(input[1]!.content)).toEqual(request);
 });
+
+describe('research planning through real SDK with local HTTP fixtures', () => {
+  const request = {
+    preferences: {
+      interests: ['TypeScript'],
+      audience: 'Peers',
+      language: 'English',
+    },
+    candidates: [
+      {
+        title: 'Release',
+        publishedAt: '2026-10-15T00:00:00Z',
+        excerpt: 'New TypeScript support in this release.',
+        score: {
+          topic: 30,
+          significance: 5,
+          recency: 20,
+          personal: 0,
+          total: 55,
+          signals: [],
+        },
+      },
+    ],
+    personalEvidence: [{ excerpt: 'Synthetic personal TypeScript knowledge.' }],
+  };
+  it('makes one bounded structured request with separate untrusted evidence and no tools', async () => {
+    const output = {
+      ideas: [
+        {
+          angle: 'experiment',
+          personalEvidenceIndex: null,
+        },
+      ],
+    };
+    const { provider, requests } = fixture([textDraft(JSON.stringify(output))]);
+    expect((await provider.planResearch(request, signal())).output).toEqual(
+      output,
+    );
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      store: false,
+      max_output_tokens: 2500,
+    });
+    expect(requests[0]).not.toHaveProperty('tools');
+    expect(JSON.stringify(requests[0]!.input)).toContain('untrusted');
+    expect(JSON.stringify(requests[0]!.input)).toContain('personalEvidence');
+  });
+  it.each([
+    '{PRIVATE_REJECTED_JSON',
+    JSON.stringify({
+      ideas: [{ angle: 'PRIVATE_REJECTED_ANGLE', personalEvidenceIndex: null }],
+    }),
+  ])(
+    'sanitizes SDK parsing failures with a research diagnostic',
+    async (text) => {
+      const { provider, requests } = fixture([textDraft(text)]);
+      let rejected: unknown;
+      try {
+        await provider.planResearch(request, signal());
+      } catch (error) {
+        rejected = error;
+      }
+      expect(rejected).toMatchObject({
+        code: 'INVALID_OUTPUT',
+        groundingDiagnostic: {
+          scope: 'research',
+          stage: 'output_schema',
+          reason: 'INVALID_SCHEMA',
+          index: null,
+        },
+      });
+      expect(JSON.stringify(rejected)).not.toContain('PRIVATE_REJECTED');
+      expect(requests).toHaveLength(1);
+    },
+  );
+  it('never retries research provider failures', async () => {
+    const { provider, requests } = fixture([], { httpStatus: 500 });
+    await expect(
+      provider.planResearch(request, signal()),
+    ).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+    expect(requests).toHaveLength(1);
+  });
+  it('fails refusals and oversized prompts without substitution', async () => {
+    const { provider, requests } = fixture([
+      message([{ type: 'refusal', refusal: 'No' }]),
+    ]);
+    await expect(
+      provider.planResearch(request, signal()),
+    ).rejects.toMatchObject({ code: 'PROVIDER_REFUSAL' });
+    await expect(
+      provider.planResearch(
+        {
+          ...request,
+          personalEvidence: [{ excerpt: 'x'.repeat(30_001) }],
+        },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'WORKFLOW_LIMIT' });
+    expect(requests).toHaveLength(1);
+  });
+});

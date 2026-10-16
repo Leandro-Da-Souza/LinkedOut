@@ -125,3 +125,14 @@ The opt-in smoke command calls the real provider through MCP and the autonomous 
 See [architecture and tradeoffs](docs/architecture.md), [LinkedIn restrictions](docs/linkedin-boundaries.md), and [repository conventions](AGENTS.md). SQLite's built-in driver and minimal JSON logging are documented deviations from the original native-addon/Pino proposal, selected to permit complete local verification in the available offline environment.
 
 See [milestone-one verification](docs/milestone-one.md) for the actual checks performed and outstanding live-provider verification. The project is [MIT licensed](LICENSE).
+
+## Autonomous release research
+
+Milestone 2 discovers official GitHub releases and persists a ranked shortlist without a writing brief. See [setup, first live run, limits, and evidence handling](docs/milestone-two.md).
+
+```sh
+npm run research -- run --lookback-days 14 --idempotency-key research-first-live-001
+npm run ideas -- list
+```
+
+New eligible research can incur one bounded model call. Reusing a completed key returns immutable historical results without fetching or generating again. Use a new key or no key for fresh research. No scheduling or LinkedIn actions are implemented.

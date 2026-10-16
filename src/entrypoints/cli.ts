@@ -18,9 +18,84 @@ export async function runCli(
   const [group, action, ...rest] = args;
   const context: ExecutionContext = {
     actor: 'cli',
-    permissions: new Set(['read_local', 'draft_local', 'delete_local']),
+    permissions: new Set([
+      'read_local',
+      'draft_local',
+      'delete_local',
+      'research_local',
+      'review_local',
+    ]),
     ...(signal ? { signal } : {}),
   };
+  if (group === 'research' || group === 'ideas') {
+    if (group === 'research' && action === 'run') {
+      const { values, positionals } = readArgs(rest, {
+        'lookback-days': { type: 'string' },
+        'idempotency-key': { type: 'string' },
+      });
+      if (positionals.length) throw usage();
+      return app.tools.invoke(
+        'research_run',
+        {
+          ...(values['lookback-days'] !== undefined
+            ? { lookbackDays: integerFlag(values['lookback-days']) }
+            : {}),
+          ...(values['idempotency-key'] !== undefined
+            ? { idempotencyKey: values['idempotency-key'] }
+            : {}),
+        },
+        context,
+      );
+    }
+    if (group === 'research' && action === 'sources' && !rest.length)
+      return app.tools.invoke('list_research_sources', {}, context);
+    if (
+      (group === 'research' && action === 'items') ||
+      (group === 'ideas' && action === 'list')
+    ) {
+      const { values, positionals } = readArgs(rest, {
+        limit: { type: 'string' },
+        offset: { type: 'string' },
+        ...(group === 'ideas' ? { status: { type: 'string' as const } } : {}),
+      });
+      if (positionals.length) throw usage();
+      return app.tools.invoke(
+        group === 'research' ? 'list_research_items' : 'list_content_ideas',
+        {
+          ...(values['limit'] !== undefined
+            ? { limit: integerFlag(values['limit']) }
+            : {}),
+          ...(values['offset'] !== undefined
+            ? { offset: integerFlag(values['offset']) }
+            : {}),
+          ...(values['status'] !== undefined
+            ? { status: values['status'] }
+            : {}),
+        },
+        context,
+      );
+    }
+    if (action === 'get' && rest.length === 1)
+      return app.tools.invoke(
+        group === 'research' ? 'get_research_item' : 'get_content_idea',
+        { id: rest[0] },
+        context,
+      );
+    if (group === 'research' && action === 'delete-run' && rest.length === 1)
+      return app.tools.invoke('delete_research_run', { id: rest[0] }, context);
+    if (group === 'ideas' && action === 'review') {
+      const { values, positionals } = readArgs(rest, {
+        status: { type: 'string' },
+      });
+      if (positionals.length !== 1) throw usage();
+      return app.tools.invoke(
+        'review_content_idea',
+        { id: positionals[0], status: values['status'] },
+        context,
+      );
+    }
+    throw usage();
+  }
   if (group === 'artifacts') {
     if (action === 'list') {
       const { values, positionals } = readArgs(rest, {
@@ -145,7 +220,7 @@ function integerFlag(value: string): number {
 function usage(): AppError {
   return new AppError(
     'INVALID_INPUT',
-    'Usage: artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
+    'Usage: research run [--lookback-days 7..90 --idempotency-key KEY]|sources|items|get UUID|delete-run UUID; ideas list|get UUID|review UUID --status proposed|accepted|rejected; artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
   );
 }
 

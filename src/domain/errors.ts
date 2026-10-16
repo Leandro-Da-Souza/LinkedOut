@@ -1,7 +1,29 @@
 import { z } from 'zod';
 
 // Only enum values and positions may cross the diagnostic persistence boundary.
+export const researchDiagnosticSchema = z.object({
+  scope: z.literal('research'),
+  stage: z.enum([
+    'output_schema',
+    'candidate_count',
+    'public_evidence',
+    'private_evidence',
+  ]),
+  reason: z.enum([
+    'INVALID_SCHEMA',
+    'COUNT_MISMATCH',
+    'EXCERPT_TOO_SHORT',
+    'EXCERPT_TOO_LONG',
+    'QUOTE_NOT_IN_SOURCE',
+    'SELECTION_OUT_OF_RANGE',
+    'SOURCE_NOT_RELEVANT',
+  ]),
+  index: z.number().int().min(0).max(4).nullable(),
+});
+export type ResearchDiagnostic = z.infer<typeof researchDiagnosticSchema>;
+
 export const groundingDiagnosticSchema = z.discriminatedUnion('scope', [
+  researchDiagnosticSchema,
   z.object({
     scope: z.literal('claim'),
     reason: z.enum([
@@ -77,4 +99,26 @@ export function checkAbort(signal?: AbortSignal): void {
       'The operation was cancelled or exceeded its deadline.',
     );
   }
+}
+
+export function researchFailure(
+  stage: ResearchDiagnostic['stage'],
+  reason: ResearchDiagnostic['reason'],
+  index: number | null,
+): AppError {
+  return new AppError(
+    stage === 'output_schema' || stage === 'candidate_count'
+      ? 'INVALID_OUTPUT'
+      : 'UNGROUNDED_OUTPUT',
+    'Research validation failed. Inspect the structured diagnostic.',
+    { scope: 'research', stage, reason, index },
+  );
+}
+
+// Transport output is independently allowlisted; never forward raw error properties.
+export function researchErrorDetails(error: AppError): {
+  groundingDiagnostic?: ResearchDiagnostic;
+} {
+  const parsed = researchDiagnosticSchema.safeParse(error.groundingDiagnostic);
+  return parsed.success ? { groundingDiagnostic: parsed.data } : {};
 }

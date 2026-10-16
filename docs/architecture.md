@@ -16,6 +16,8 @@ flowchart TD
   Agent --> SQLite
 ```
 
+Milestone 2 adds a fixed research workflow alongside drafting, with official release ingestion, deterministic scoring, and persistent review-required ideas. See [the release-to-idea architecture](milestone-two.md).
+
 ## Boundaries and choices
 
 | Layer                | Responsibility                                                                                       |

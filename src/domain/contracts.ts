@@ -138,7 +138,12 @@ export interface DraftProvider {
     signal: AbortSignal,
   ): Promise<{ calls: ProposedCall[]; metadata: ModelMetadata }>;
 }
-export type Permission = 'read_local' | 'draft_local' | 'delete_local';
+export type Permission =
+  | 'read_local'
+  | 'draft_local'
+  | 'delete_local'
+  | 'research_local'
+  | 'review_local';
 export interface ExecutionContext {
   actor: 'mcp' | 'cli' | 'agent' | 'smoke' | 'test';
   permissions: ReadonlySet<Permission>;

@@ -60,12 +60,20 @@ try {
   assert.deepEqual(
     (await client.listTools()).tools.map((tool) => tool.name).sort(),
     [
+      'delete_research_run',
       'delete_review_artifact',
       'draft_post',
+      'get_content_idea',
       'get_draft',
+      'get_research_item',
       'get_review_artifact',
+      'list_content_ideas',
       'list_drafts',
+      'list_research_items',
+      'list_research_sources',
       'list_review_artifacts',
+      'research_run',
+      'review_content_idea',
     ],
   );
   let draft;

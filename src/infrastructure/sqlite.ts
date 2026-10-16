@@ -1,3 +1,8 @@
+import type {
+  ContentIdea,
+  ResearchItem,
+  ResearchResult,
+} from '../domain/research.js';
 import type { ReviewArtifact } from '../domain/assessment.js';
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
@@ -10,7 +15,7 @@ import type { ErrorCode, GroundingDiagnostic } from '../domain/errors.js';
 export interface Run {
   id: string;
   userId: string;
-  kind: 'draft' | 'agent';
+  kind: 'draft' | 'agent' | 'research';
   actor: ExecutionContext['actor'];
   status: 'running' | 'succeeded' | 'failed';
   createdAt: string;
@@ -21,6 +26,7 @@ export interface Run {
   draftId: string | null;
   reviewArtifactId: string | null;
   planning: unknown;
+  researchResultId?: string | null;
 }
 
 // Numbered migrations stay append-only. BEGIN IMMEDIATE serializes startup migrations.
@@ -53,6 +59,31 @@ const migrations = [
   CREATE INDEX artifacts_owner_order ON review_artifacts(user_id, created_at DESC, id DESC);
   ALTER TABLE runs ADD COLUMN review_artifact_id TEXT;
   ALTER TABLE tool_executions ADD COLUMN review_artifact_id TEXT;`,
+  `CREATE TABLE research_items (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, identity TEXT NOT NULL,
+    content_hash TEXT NOT NULL, retrieved_at TEXT NOT NULL, item_json TEXT NOT NULL,
+    UNIQUE(user_id, identity, content_hash)
+  );
+  CREATE TABLE research_cache (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+  CREATE TABLE research_run_items (
+    run_id TEXT NOT NULL REFERENCES runs(id), item_id TEXT NOT NULL REFERENCES research_items(id) ON DELETE CASCADE,
+    PRIMARY KEY(run_id, item_id)
+  );
+  CREATE TABLE research_results (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id), user_id TEXT NOT NULL, result_json TEXT NOT NULL
+  );
+  CREATE TABLE content_ideas (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id),
+    item_id TEXT NOT NULL REFERENCES research_items(id), identity TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('proposed','accepted','rejected')), idea_json TEXT NOT NULL,
+    UNIQUE(user_id, identity)
+  );
+  CREATE TABLE idea_reviews (
+    id TEXT PRIMARY KEY, idea_id TEXT NOT NULL REFERENCES content_ideas(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL, status TEXT NOT NULL
+  );
+  ALTER TABLE runs ADD COLUMN research_result_id TEXT;
+  ALTER TABLE tool_executions ADD COLUMN research_result_id TEXT;`,
 ];
 
 export class SqliteStore {
@@ -131,6 +162,353 @@ export class SqliteStore {
       );
     return id;
   }
+  reserveResearch(
+    userId: string,
+    requestHash: string,
+    request: unknown,
+    key: string | undefined,
+    context: ExecutionContext,
+  ): { runId: string; result?: ResearchResult } {
+    return this.guarded(() =>
+      this.transaction(() => {
+        if (key) {
+          const previous = this.db
+            .prepare(
+              'SELECT * FROM tool_executions WHERE user_id = ? AND idempotency_key = ?',
+            )
+            .get(userId, key);
+          if (previous) {
+            if (previous['request_hash'] !== requestHash)
+              throw new AppError(
+                'IDEMPOTENCY_CONFLICT',
+                'This key belongs to different input or execution kind.',
+              );
+            if (previous['status'] === 'running')
+              throw new AppError(
+                'IN_PROGRESS',
+                'Research is running or was interrupted. Inspect history; use a new key for deliberate retry.',
+              );
+            if (previous['status'] === 'failed')
+              throw new AppError(
+                'PREVIOUS_FAILURE',
+                'Research previously failed. Use a new key for deliberate retry.',
+                previous['grounding_diagnostic_json']
+                  ? groundingDiagnosticSchema.parse(
+                      JSON.parse(String(previous['grounding_diagnostic_json'])),
+                    )
+                  : undefined,
+              );
+            const result = this.db
+              .prepare(
+                'SELECT result_json FROM research_results WHERE run_id = ? AND user_id = ?',
+              )
+              .get(String(previous['run_id']), userId);
+            if (!result)
+              throw new AppError(
+                'NOT_FOUND',
+                'The historical research result was deleted. Use a new key for new research.',
+              );
+            return {
+              runId: String(previous['run_id']),
+              result: JSON.parse(
+                String(result['result_json']),
+              ) as ResearchResult,
+            };
+          }
+        }
+        const runId = this.insertRun(userId, 'research', context);
+        this.db
+          .prepare(
+            "INSERT INTO tool_executions (id, run_id, user_id, idempotency_key, request_hash, request_json, status) VALUES (?, ?, ?, ?, ?, ?, 'running')",
+          )
+          .run(
+            randomUUID(),
+            runId,
+            userId,
+            key ?? null,
+            requestHash,
+            JSON.stringify(request),
+          );
+        return { runId };
+      }),
+    );
+  }
+  getResearchCache(key: string): unknown {
+    return this.guarded(() => {
+      const row = this.db
+        .prepare('SELECT value_json FROM research_cache WHERE key = ?')
+        .get(key);
+      return row
+        ? (JSON.parse(String(row['value_json'])) as unknown)
+        : undefined;
+    });
+  }
+  setResearchCache(key: string, value: unknown): void {
+    this.guarded(() =>
+      this.db
+        .prepare(
+          'INSERT INTO research_cache (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json',
+        )
+        .run(key, JSON.stringify(value)),
+    );
+  }
+  saveResearchItems(
+    userId: string,
+    items: ResearchItem[],
+    runId: string,
+  ): ResearchItem[] {
+    return this.guarded(() =>
+      this.transaction(() =>
+        items.map((item) => {
+          this.db
+            .prepare(
+              'INSERT OR IGNORE INTO research_items (id, user_id, identity, content_hash, retrieved_at, item_json) VALUES (?, ?, ?, ?, ?, ?)',
+            )
+            .run(
+              item.id,
+              userId,
+              item.identity,
+              item.contentHash,
+              item.retrievedAt,
+              JSON.stringify(item),
+            );
+          const row = this.db
+            .prepare(
+              'SELECT id FROM research_items WHERE user_id = ? AND identity = ? AND content_hash = ?',
+            )
+            .get(userId, item.identity, item.contentHash)!;
+          const current = { ...item, id: String(row['id']) };
+          this.db
+            .prepare(
+              'UPDATE research_items SET retrieved_at = ?, item_json = ? WHERE id = ?',
+            )
+            .run(item.retrievedAt, JSON.stringify(current), current.id);
+          this.db
+            .prepare(
+              'INSERT OR IGNORE INTO research_run_items (run_id, item_id) VALUES (?, ?)',
+            )
+            .run(runId, current.id);
+          return current;
+        }),
+      ),
+    );
+  }
+  researchIdentitySeen(userId: string, identity: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          'SELECT id FROM content_ideas WHERE user_id = ? AND identity = ?',
+        )
+        .get(userId, identity),
+    );
+  }
+  completeResearch(userId: string, result: ResearchResult): void {
+    this.guarded(() =>
+      this.transaction(() => {
+        // A concurrent run may have proposed the same release after initial selection.
+        result.ideas = result.ideas.filter(
+          (idea) => !this.researchIdentitySeen(userId, idea.identity),
+        );
+        for (const idea of result.ideas)
+          this.db
+            .prepare(
+              'INSERT INTO content_ideas (id, user_id, run_id, item_id, identity, status, idea_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            )
+            .run(
+              idea.id,
+              userId,
+              result.runId,
+              idea.itemId,
+              idea.identity,
+              idea.status,
+              JSON.stringify(idea),
+            );
+        this.db
+          .prepare(
+            'INSERT INTO research_results (run_id, user_id, result_json) VALUES (?, ?, ?)',
+          )
+          .run(result.runId, userId, JSON.stringify(result));
+        this.db
+          .prepare(
+            "UPDATE runs SET status = 'succeeded', finished_at = ?, research_result_id = ?, planning_json = ? WHERE id = ? AND status = 'running'",
+          )
+          .run(
+            new Date().toISOString(),
+            result.runId,
+            JSON.stringify({
+              coverage: result.coverage,
+              ideaCount: result.ideas.length,
+              requests: result.requests,
+              modelCalls: result.modelCalls,
+              outcomes: result.outcomes,
+              generation: result.generation,
+            }),
+            result.runId,
+          );
+        this.db
+          .prepare(
+            "UPDATE tool_executions SET status = 'succeeded', research_result_id = ? WHERE run_id = ? AND status = 'running'",
+          )
+          .run(result.runId, result.runId);
+      }),
+    );
+  }
+  listResearchItems(userId: string, limit: number, offset: number) {
+    return this.guarded(() =>
+      this.db
+        .prepare(
+          'SELECT id, item_json FROM research_items WHERE user_id = ? ORDER BY retrieved_at DESC, id DESC LIMIT ? OFFSET ?',
+        )
+        .all(userId, limit, offset)
+        .map((row) => {
+          const item = JSON.parse(String(row['item_json'])) as ResearchItem;
+          return {
+            id: item.id,
+            repository: item.repository,
+            title: item.title,
+            publishedAt: item.publishedAt,
+            retrievedAt: item.retrievedAt,
+            url: item.url,
+            dateQuality: item.dateQuality,
+          };
+        }),
+    );
+  }
+  getResearchItem(userId: string, id: string): ResearchItem {
+    return this.guarded(() => {
+      const row = this.db
+        .prepare(
+          'SELECT item_json FROM research_items WHERE user_id = ? AND id = ?',
+        )
+        .get(userId, id);
+      if (!row) throw new AppError('NOT_FOUND', 'Research item not found.');
+      return JSON.parse(String(row['item_json'])) as ResearchItem;
+    });
+  }
+  listIdeas(userId: string, limit: number, offset: number, status?: string) {
+    return this.guarded(() =>
+      this.db
+        .prepare(
+          'SELECT idea_json, status FROM content_ideas WHERE user_id = ? AND (? IS NULL OR status = ?) ORDER BY (SELECT created_at FROM runs WHERE runs.id = content_ideas.run_id) DESC, run_id DESC, rowid ASC LIMIT ? OFFSET ?',
+        )
+        .all(userId, status ?? null, status ?? null, limit, offset)
+        .map((row) => {
+          const idea = JSON.parse(String(row['idea_json'])) as ContentIdea;
+          return {
+            id: idea.id,
+            runId: idea.runId,
+            title: idea.title,
+            angle: idea.angle,
+            score: idea.score.total,
+            status: String(row['status']),
+            publishedAt: idea.publicEvidence.publishedAt,
+            reviewRequired: true,
+          };
+        }),
+    );
+  }
+  getIdea(userId: string, id: string): ContentIdea {
+    return this.guarded(() => {
+      const row = this.db
+        .prepare(
+          'SELECT idea_json, status FROM content_ideas WHERE user_id = ? AND id = ?',
+        )
+        .get(userId, id);
+      if (!row) throw new AppError('NOT_FOUND', 'Idea not found.');
+      return {
+        ...(JSON.parse(String(row['idea_json'])) as ContentIdea),
+        status: row['status'] as ContentIdea['status'],
+      };
+    });
+  }
+  reviewIdea(
+    userId: string,
+    id: string,
+    status: ContentIdea['status'],
+  ): ContentIdea {
+    return this.guarded(() =>
+      this.transaction(() => {
+        const idea = this.getIdea(userId, id);
+        if (idea.status !== status) {
+          this.db
+            .prepare(
+              'UPDATE content_ideas SET status = ? WHERE id = ? AND user_id = ?',
+            )
+            .run(status, id, userId);
+          this.db
+            .prepare(
+              'INSERT INTO idea_reviews (id, idea_id, created_at, status) VALUES (?, ?, ?, ?)',
+            )
+            .run(randomUUID(), id, new Date().toISOString(), status);
+        }
+        return { ...idea, status };
+      }),
+    );
+  }
+  deleteResearchRun(userId: string, runId: string): void {
+    this.guarded(() =>
+      this.transaction(() => {
+        const run = this.getRun(userId, runId);
+        if (run.kind !== 'research')
+          throw new AppError('NOT_FOUND', 'Research run not found.');
+        if (run.status === 'running')
+          throw new AppError(
+            'IN_PROGRESS',
+            'Cannot delete an active or interrupted research run.',
+          );
+        this.db
+          .prepare('DELETE FROM content_ideas WHERE user_id = ? AND run_id = ?')
+          .run(userId, runId);
+        this.db
+          .prepare(
+            'DELETE FROM research_results WHERE user_id = ? AND run_id = ?',
+          )
+          .run(userId, runId);
+        this.db
+          .prepare(
+            "UPDATE tool_executions SET request_json = '{}', research_result_id = NULL WHERE user_id = ? AND run_id = ?",
+          )
+          .run(userId, runId);
+        this.db
+          .prepare(
+            'UPDATE runs SET research_result_id = NULL, planning_json = NULL WHERE user_id = ? AND id = ?',
+          )
+          .run(userId, runId);
+        const linked = this.db
+          .prepare('SELECT item_id FROM research_run_items WHERE run_id = ?')
+          .all(runId);
+        this.db
+          .prepare('DELETE FROM research_run_items WHERE run_id = ?')
+          .run(runId);
+        for (const row of linked)
+          this.db
+            .prepare(
+              'DELETE FROM research_items WHERE user_id = ? AND id = ? AND id NOT IN (SELECT item_id FROM content_ideas) AND id NOT IN (SELECT item_id FROM research_run_items)',
+            )
+            .run(userId, String(row['item_id']));
+        this.db
+          .prepare("DELETE FROM research_cache WHERE key <> 'github-cooldown'")
+          .run();
+      }),
+    );
+  }
+  pruneResearch(userId: string, before: string): void {
+    this.guarded(() =>
+      this.transaction(() => {
+        this.db
+          .prepare(
+            'DELETE FROM research_items WHERE user_id = ? AND retrieved_at < ? AND id NOT IN (SELECT item_id FROM content_ideas)',
+          )
+          .run(userId, before);
+        this.db
+          .prepare(
+            "DELETE FROM research_cache WHERE json_extract(value_json, '$.savedAt') < ?",
+          )
+          .run(Date.parse(before));
+      }),
+    );
+  }
+
   reserveAgent(
     userId: string,
     hash: string,
@@ -276,7 +654,9 @@ export class SqliteStore {
     // errors, rejected text, source IDs, or provider-supplied fields.
     const parsed = groundingDiagnosticSchema.safeParse(diagnostic);
     const diagnosticJson =
-      code === 'UNGROUNDED_OUTPUT' && parsed.success
+      parsed.success &&
+      (code === 'UNGROUNDED_OUTPUT' ||
+        (code === 'INVALID_OUTPUT' && parsed.data.scope === 'research'))
         ? JSON.stringify(parsed.data)
         : null;
     const finishedAt = new Date().toISOString();
@@ -475,6 +855,9 @@ export class SqliteStore {
         : null,
       draftId: row['draft_id'] as string | null,
       reviewArtifactId: row['review_artifact_id'] as string | null,
+      ...(row['kind'] === 'research'
+        ? { researchResultId: row['research_result_id'] as string | null }
+        : {}),
       planning: row['planning_json']
         ? (JSON.parse(String(row['planning_json'])) as unknown)
         : null,

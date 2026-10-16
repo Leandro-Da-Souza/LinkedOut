@@ -1,3 +1,6 @@
+import { ResearchWorkflow } from '../application/research.js';
+import { GithubResearchFeed } from '../infrastructure/github-research.js';
+import type { ResearchFeed, ResearchPlanner } from '../domain/research.js';
 import type { DraftProvider } from '../domain/contracts.js';
 import { AppError } from '../domain/errors.js';
 import type { Config } from '../infrastructure/config.js';
@@ -14,7 +17,12 @@ import { join } from 'node:path';
 
 export function createApplication(
   config: Config = loadConfig(),
-  overrides: { provider?: DraftProvider; logger?: Logger } = {},
+  overrides: {
+    provider?: DraftProvider;
+    logger?: Logger;
+    researchFeed?: ResearchFeed;
+    researchPlanner?: ResearchPlanner;
+  } = {},
 ) {
   const logger = overrides.logger ?? createLogger();
   const unavailable = async (): Promise<never> => {
@@ -46,7 +54,27 @@ export function createApplication(
     config.runTimeoutMs,
     knowledge,
   );
-  const tools = createTools(service, store, config.profile);
+  const researchPlanner: ResearchPlanner =
+    overrides.researchPlanner ??
+    (config.apiKey && config.model
+      ? new OpenAIProvider({ apiKey: config.apiKey, model: config.model })
+      : {
+          provider: 'openai',
+          model: config.model ?? 'unconfigured',
+          planResearch: unavailable,
+        });
+  const research = new ResearchWorkflow(
+    store,
+    overrides.researchFeed ??
+      new GithubResearchFeed(fetch, () => new Date(), store),
+    researchPlanner,
+    config.profile,
+    knowledge,
+    logger,
+    config.researchLookbackDays ?? 14,
+    config.runTimeoutMs,
+  );
+  const tools = createTools(service, store, config.profile, research);
   const agent = new AgentWorkflow(
     tools,
     provider,
@@ -62,6 +90,7 @@ export function createApplication(
     store,
     tools,
     agent,
+    research,
     knowledge,
     close: () => {
       try {

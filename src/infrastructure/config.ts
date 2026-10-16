@@ -11,6 +11,12 @@ const environmentSchema = z.object({
   LINKEDOUT_DATA_DIR: z.string().trim().min(1).default('.linkedout'),
   LINKEDOUT_PROFILE_PATH: z.string().trim().min(1).optional(),
   LINKEDOUT_KNOWLEDGE_DIR: z.string().trim().min(1).default('knowledge'),
+  LINKEDOUT_RESEARCH_LOOKBACK_DAYS: z.coerce
+    .number()
+    .int()
+    .min(7)
+    .max(90)
+    .default(14),
   LINKEDOUT_RUN_TIMEOUT_MS: z.coerce
     .number()
     .int()
@@ -25,6 +31,7 @@ export interface Config {
   profile: UserProfile;
   runTimeoutMs: number;
   knowledgeDir?: string;
+  researchLookbackDays?: number;
 }
 
 export function loadConfig(
@@ -70,5 +77,6 @@ export function loadConfig(
     knowledgeDir,
     profile,
     runTimeoutMs: values.LINKEDOUT_RUN_TIMEOUT_MS,
+    researchLookbackDays: values.LINKEDOUT_RESEARCH_LOOKBACK_DAYS,
   };
 }

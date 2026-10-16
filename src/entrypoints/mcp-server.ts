@@ -4,7 +4,7 @@ import {
   StdioServerTransport,
 } from '@modelcontextprotocol/server/stdio';
 import type { Application } from './app.js';
-import { publicError } from '../domain/errors.js';
+import { publicError, researchErrorDetails } from '../domain/errors.js';
 
 export function createMcpServer(
   app: Application,
@@ -25,7 +25,7 @@ export function createMcpServer(
           readOnlyHint: tool.readOnly,
           destructiveHint: tool.permission === 'delete_local',
           idempotentHint: tool.readOnly,
-          openWorldHint: tool.name === 'draft_post',
+          openWorldHint: tool.openWorld ?? false,
         },
       },
       async (input, ctx) => {
@@ -37,6 +37,8 @@ export function createMcpServer(
                 'read_local',
                 'draft_local',
                 'delete_local',
+                'research_local',
+                'review_local',
               ]),
               signal: AbortSignal.any([ctx.mcpReq.signal, shutdownSignal]),
             });
@@ -57,6 +59,7 @@ export function createMcpServer(
                     error: {
                       code: safe.code,
                       message: safe.message,
+                      ...researchErrorDetails(safe),
                       ...(safe.reviewArtifactId
                         ? { reviewArtifactId: safe.reviewArtifactId }
                         : {}),

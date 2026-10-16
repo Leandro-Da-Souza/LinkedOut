@@ -20,6 +20,8 @@
     "drafts": "node --env-file-if-exists=.env dist/entrypoints/cli.js drafts",
     "artifacts": "node --env-file-if-exists=.env dist/entrypoints/cli.js artifacts",
     "runs": "node --env-file-if-exists=.env dist/entrypoints/cli.js runs",
+    "research": "node --env-file-if-exists=.env dist/entrypoints/cli.js research",
+    "ideas": "node --env-file-if-exists=.env dist/entrypoints/cli.js ideas",
     "knowledge": "node --env-file-if-exists=.env dist/entrypoints/cli.js knowledge",
     "smoke:live": "npm run build && node --env-file-if-exists=.env dist/entrypoints/smoke.js"
   },
