@@ -80,6 +80,7 @@ export interface GenerationRequest {
   knowledge?: KnowledgeContext;
   research?: import('./research-draft.js').ResearchDraftContext;
   commentaryLimit?: number;
+  publicEvidence?: import('./research-draft.js').PublicEvidenceProjection;
 }
 export interface ModelMetadata {
   provider: string;
@@ -143,6 +144,7 @@ export interface DraftProvider {
   ): Promise<{ calls: ProposedCall[]; metadata: ModelMetadata }>;
 }
 export type Permission =
+  | 'recover_local'
   | 'read_local'
   | 'draft_local'
   | 'delete_local'

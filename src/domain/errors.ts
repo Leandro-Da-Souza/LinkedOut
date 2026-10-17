@@ -50,6 +50,9 @@ export const groundingDiagnosticSchema = z.discriminatedUnion('scope', [
 export type GroundingDiagnostic = z.infer<typeof groundingDiagnosticSchema>;
 
 export type ErrorCode =
+  | 'INTERRUPTED'
+  | 'EXECUTION_STATE_CONFLICT'
+  | 'RECOVERY_UNSAFE'
   | 'IDEA_NOT_ACCEPTED'
   | 'RESEARCH_EVIDENCE_INVALID'
   | 'RESEARCH_REVIEW_CHANGED'

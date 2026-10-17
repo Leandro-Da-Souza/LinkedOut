@@ -98,7 +98,9 @@ try {
     const result = body(await client.callTool({ name: tool, arguments: args }));
     draft = result.draft;
     if (process.env.LINKEDOUT_TEST_IDEA_ID) {
-      assert.equal(draft.publicCitations[0].kind, 'research_attachment');
+      assert.ok(Array.isArray(draft.publicCitations));
+      assert.equal(draft.assessment.version, 'research-assessment-v1');
+      assert.ok(!draft.body.startsWith('Publisher report:'));
       assert.equal(draft.review.required, true);
       assert.equal(
         draft.provenance.research.ideaId,

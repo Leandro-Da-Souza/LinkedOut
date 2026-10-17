@@ -81,8 +81,15 @@ export function fixtureProvider(options = {}) {
                     index === data.units.length - 1
                       ? 'PRIVATE_INVALID_ID'
                       : unit.id,
-                  category: 'advice_opinion_question',
-                  evidence: null,
+                  ...(data.publicEvidence
+                    ? {
+                        category: 'opinion_advice_question',
+                        evidenceKind: 'none',
+                        privateSourceIndex: null,
+                        support: 'not_applicable',
+                        reason: null,
+                      }
+                    : { category: 'advice_opinion_question', evidence: null }),
                 })),
               }),
             },

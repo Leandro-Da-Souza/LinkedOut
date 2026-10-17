@@ -230,6 +230,8 @@ describe('shared drafting services with real SQLite', () => {
         JSON.stringify(legacy),
         legacy.id,
       );
+      db.exec(`DROP TRIGGER immutable_run_owner; DROP TABLE run_reconciliations;
+        ALTER TABLE runs DROP COLUMN owner_json;`);
       db.exec(
         `DROP TABLE research_draft_links; ALTER TABLE content_ideas DROP COLUMN review_revision;`,
       );

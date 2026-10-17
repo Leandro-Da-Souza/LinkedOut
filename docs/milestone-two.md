@@ -96,7 +96,7 @@ npm run runs -- list
 
 The live command can incur one paid model request when eligible unseen candidates exist. Use a different new key for subsequent fresh attempts.
 
-CLI signals and MCP cancellation propagate to fetching, private retrieval, and planning. A failed key cannot retry; use a new key deliberately. An abruptly interrupted reservation remains `running`/`IN_PROGRESS` for inspection. Automatic recovery and remote cancellation are deferred. Provider billing may be uncertain after interruption; no silent model retry occurs.
+CLI signals and MCP cancellation propagate to fetching, private retrieval, and planning. A failed key cannot retry; use a new key deliberately. An abruptly interrupted reservation remains `running`/`IN_PROGRESS` until explicit [CLI reconciliation](interrupted-run-recovery.md) proves local process death. Legacy or ambiguous ownership remains blocked. Automatic recovery and remote cancellation are deferred. Provider billing may be uncertain after interruption; no silent model retry occurs.
 
 Unique-key reservations share the existing owner/key namespace with drafting. Idea/result completion is transactional. Concurrent distinct runs recheck release identities at commit, preventing duplicate ideas; they may each have incurred their single model call before commit. No transaction spans network/model work.
 
@@ -110,7 +110,7 @@ Public items/caches without idea references expire after 90 days, pruned during 
 npm run research -- delete-run RUN_UUID
 ```
 
-Deletion removes that completed/failed run's payload, ideas and reviews, associated public items not shared by other runs, and the public HTTP response cache (rate-limit cooldown remains enforced). It preserves safe execution history and the key tombstone, so replay reports deletion instead of regenerating. Deleting ideas also forgets their suppression/review decisions. Active/interrupted runs cannot be deleted through this command. Logical deletion does not erase SQLite free pages/WAL, backups, or externally copied outputs.
+Deletion removes that completed/failed run's payload, ideas and reviews, associated public items not shared by other runs, and the public HTTP response cache (rate-limit cooldown remains enforced). It preserves safe execution history and the key tombstone, so replay reports deletion instead of regenerating. Deleting ideas also forgets their suppression/review decisions. Running reservations cannot be deleted through this command; eligible abandoned executions must first be explicitly reconciled. Logical deletion does not erase SQLite free pages/WAL, backups, or externally copied outputs.
 
 MCP exposes `research_run`, `list_research_sources`, `list_research_items`, `get_research_item`, `list_content_ideas`, `get_content_idea`, `review_content_idea`, and `delete_research_run`. All use the same services as the CLI. Lists omit private excerpts; explicit idea reads and run results include evidence.
 

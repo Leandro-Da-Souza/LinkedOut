@@ -1,9 +1,11 @@
+import type { editorialCategory } from './research-draft.js';
 import { z } from 'zod';
 import type { Draft, GeneratedBody, ModelMetadata } from './contracts.js';
 import type { GroundingDiagnostic, ErrorCode } from './errors.js';
 
+export const SEGMENTATION_VERSION = 'sentence-segmentation-v1';
 export const ASSESSMENT_VERSION = 'assessment-v2';
-export const GROUNDING_POLICY_VERSION = 'whole-unit-attribution-v2';
+export const GROUNDING_POLICY_VERSION = 'whole-excerpt-attribution-v3';
 export interface BodyUnit {
   id: string;
   start: number;
@@ -13,6 +15,7 @@ export interface BodyUnit {
 export interface AssessmentRequest {
   units: Pick<BodyUnit, 'id' | 'text'>[];
   sources: { id: string; excerpt: string }[];
+  publicEvidence?: import('./research-draft.js').PublicEvidenceProjection;
   publicContext?: { quote: string; verification: 'publisher_reported' };
 }
 const category = z.enum([
@@ -58,16 +61,27 @@ export interface AssessmentDiagnostic {
     | 'DUPLICATE_UNIT'
     | 'UNKNOWN_UNIT'
     | 'CONTRADICTORY_ADVICE'
-    | 'FINDING_LIMIT';
+    | 'FINDING_LIMIT'
+    | 'INVALID_COMBINATION'
+    | 'INVALID_SOURCE'
+    | 'UNSUPPORTED_PREMISE'
+    | 'QUANTITY_CHANGED'
+    | 'QUALIFICATION_OMITTED'
+    | 'OWNERSHIP_TRANSFER'
+    | 'AMBIGUOUS_ATTRIBUTION';
   unitId?: string;
 }
 export type EvidenceStatus =
-  'exact_match' | 'plausible_paraphrase' | 'unsupported' | 'invalid_reference';
+  | 'assessed_supported'
+  | 'exact_match'
+  | 'plausible_paraphrase'
+  | 'unsupported'
+  | 'invalid_reference';
 export interface AssessmentFinding {
   unitId: string;
   start: number;
   end: number;
-  category: z.infer<typeof category>;
+  category: z.infer<typeof category> | z.infer<typeof editorialCategory>;
   status: EvidenceStatus;
   sourceId?: string;
   quote?: string;
@@ -76,8 +90,15 @@ export interface AssessmentReport {
   researchPolicyVersion?: string;
   publicEvidenceHash?: string;
   publicCitations?: import('./research-draft.js').PublicCitation[];
-  version: 'assessment-v1' | typeof ASSESSMENT_VERSION;
-  policyVersion: 'exact-attribution-v1' | typeof GROUNDING_POLICY_VERSION;
+  version:
+    'assessment-v1' | typeof ASSESSMENT_VERSION | 'research-assessment-v1';
+  policyVersion:
+    | 'exact-attribution-v1'
+    | typeof GROUNDING_POLICY_VERSION
+    | 'whole-unit-attribution-v2'
+    | 'research-grounding-v1'
+    | 'research-grounding-v2';
+  segmentationVersion?: string;
   bodyHash: string;
   knowledgeHash: string;
   complete: boolean;
@@ -87,7 +108,8 @@ export interface AssessmentReport {
     unitId: string;
     start: number;
     end: number;
-    category: z.infer<typeof category> | null;
+    category:
+      z.infer<typeof category> | z.infer<typeof editorialCategory> | null;
   }[];
   issues: (
     | 'INVALID_ASSESSMENT'

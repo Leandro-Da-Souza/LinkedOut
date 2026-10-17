@@ -45,23 +45,15 @@ export const rejectionCases: {
       ['CLAIM_NOT_IN_BODY', claim],
     ] as const
   ).map(([reason, invalidClaim]) => ({
-    diagnostic: { scope: 'claim' as const, reason, index: 1 },
+    diagnostic: {
+      scope: 'claim' as const,
+      reason,
+      index: reason === 'CLAIM_NOT_IN_BODY' ? 0 : 1,
+    },
     output: {
-      // For the absent-body case use a valid first claim on a shorter span.
-      body:
-        reason === 'CLAIM_NOT_IN_BODY'
-          ? 'synthetic reporting application.'
-          : quote,
-      claims: [
-        reason === 'CLAIM_NOT_IN_BODY'
-          ? {
-              ...claim,
-              text: 'synthetic reporting application.',
-              quote: 'synthetic reporting application.',
-            }
-          : claim,
-        invalidClaim,
-      ],
+      body: reason === 'CLAIM_NOT_IN_BODY' ? 'General reflection.' : quote,
+      claims:
+        reason === 'CLAIM_NOT_IN_BODY' ? [invalidClaim] : [claim, invalidClaim],
       warnings: [],
     },
   })),

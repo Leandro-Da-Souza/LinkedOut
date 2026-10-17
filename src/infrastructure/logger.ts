@@ -5,6 +5,7 @@ export interface LogEvent {
     | 'run_started'
     | 'run_succeeded'
     | 'run_failed'
+    | 'run_interrupted'
     | 'server_started'
     | 'server_stopped';
   runId?: string;

@@ -1,3 +1,4 @@
+import { RecoveryService } from '../application/recovery.js';
 import { ResearchWorkflow } from '../application/research.js';
 import { GithubResearchFeed } from '../infrastructure/github-research.js';
 import type { ResearchFeed, ResearchPlanner } from '../domain/research.js';
@@ -92,6 +93,7 @@ export function createApplication(
     agent,
     research,
     knowledge,
+    recovery: new RecoveryService(store, config.profile.id, logger),
     close: () => {
       try {
         store.close();

@@ -1,15 +1,21 @@
 import {
   ideaDraftInputSchema,
   RESEARCH_DRAFT_VERSION,
+  LEGACY_RESEARCH_DRAFT_VERSION,
+  RESEARCH_ASSESSMENT_VERSION,
+  RESEARCH_GROUNDING_VERSION,
+  RESEARCH_SEGMENTATION_VERSION,
 } from '../domain/research-draft.js';
 import type { ResearchDraftContext } from '../domain/research-draft.js';
 import {
   resolveResearchDraft,
   researchAttachment,
+  publicEvidenceProjection,
   assertDraftPolicy,
 } from './research-drafting.js';
 import {
   ASSESSMENT_VERSION,
+  SEGMENTATION_VERSION,
   GROUNDING_POLICY_VERSION,
   type AssessmentReport,
   type ReviewArtifact,
@@ -34,10 +40,11 @@ import type { Logger } from '../infrastructure/logger.js';
 import type { SqliteStore } from '../infrastructure/sqlite.js';
 import { EMPTY_KNOWLEDGE } from '../domain/knowledge.js';
 import type { KnowledgeReader } from '../domain/knowledge.js';
-import { groundDraft } from './grounding.js';
+import { assessEditorial, editorialUnits } from './editorial-assessment.js';
+import { groundDraft, groundingReview } from './grounding.js';
 
 export const PROMPT_VERSION = 'draft-v5-separated-facts';
-export const PIPELINE_VERSION = `${PROMPT_VERSION}:${ASSESSMENT_VERSION}:${GROUNDING_POLICY_VERSION}`;
+export const PIPELINE_VERSION = `${PROMPT_VERSION}:${ASSESSMENT_VERSION}:${GROUNDING_POLICY_VERSION}:${SEGMENTATION_VERSION}`;
 export class DraftService {
   constructor(
     private readonly store: SqliteStore,
@@ -97,7 +104,9 @@ export class DraftService {
       ? AbortSignal.any([deadline, context.signal])
       : deadline;
     const research: ResearchDraftContext | undefined = resolved?.research;
-    const attachment = research ? researchAttachment(research) : undefined;
+    const publicEvidence = research
+      ? publicEvidenceProjection(research)
+      : undefined;
     const promptVersion = research ? RESEARCH_DRAFT_VERSION : PROMPT_VERSION;
     const tool = research ? 'draft_from_idea' : 'draft_post';
     const knowledge = structuredClone(
@@ -121,11 +130,6 @@ export class DraftService {
         'WORKFLOW_LIMIT',
         'Private evidence exceeds the drafting budget.',
       );
-    if (attachment && attachment.prefix.length >= 3000)
-      throw new AppError(
-        'WORKFLOW_LIMIT',
-        'The attributed research attachment exceeds the draft budget.',
-      );
     const warnings = [...(resolved?.warnings ?? [])];
     if (
       resolved?.idea.personalEvidence &&
@@ -148,9 +152,7 @@ export class DraftService {
       },
       profile: this.profile,
       knowledge,
-      ...(research && attachment
-        ? { research, commentaryLimit: 3000 - attachment.prefix.length }
-        : {}),
+      ...(research ? { research, publicEvidence: publicEvidence! } : {}),
     };
     // Fixed construction order makes normalized effective inputs deterministic.
     const hash = createHash('sha256')
@@ -160,7 +162,7 @@ export class DraftService {
           provider: this.provider.provider,
           model: this.provider.model,
           promptVersion: research
-            ? `${RESEARCH_DRAFT_VERSION}:${PIPELINE_VERSION}`
+            ? `${RESEARCH_DRAFT_VERSION}:${RESEARCH_ASSESSMENT_VERSION}:${RESEARCH_GROUNDING_VERSION}:${RESEARCH_SEGMENTATION_VERSION}`
             : PIPELINE_VERSION,
         }),
       )
@@ -172,6 +174,21 @@ export class DraftService {
       input.idempotencyKey,
       context,
       research,
+      research
+        ? digest({
+            request: {
+              input: request.input,
+              profile: request.profile,
+              knowledge: request.knowledge,
+              research,
+              commentaryLimit:
+                3000 - researchAttachment(research).prefix.length,
+            },
+            provider: this.provider.provider,
+            model: this.provider.model,
+            promptVersion: `${LEGACY_RESEARCH_DRAFT_VERSION}:draft-v5-separated-facts:assessment-v2:whole-unit-attribution-v2`,
+          })
+        : undefined,
     );
     if (reservation.draft) return { draft: reservation.draft, replayed: true };
     const runId = reservation.runId;
@@ -210,7 +227,7 @@ export class DraftService {
         const retainedBody = generatedBodySchema.shape.body.safeParse(rawBody);
         if (retainedBody.success) {
           candidate = {
-            body: `${attachment?.prefix ?? ''}${retainedBody.data}`,
+            body: retainedBody.data,
             warnings,
           };
           generation = generated.metadata;
@@ -222,7 +239,7 @@ export class DraftService {
       }
       const commentary = validated.data;
       candidate = {
-        body: `${attachment?.prefix ?? ''}${commentary.body}`,
+        body: commentary.body,
         warnings: [...commentary.warnings, ...warnings],
       };
       generation = generated.metadata;
@@ -233,19 +250,17 @@ export class DraftService {
         );
       checkAbort(signal);
       const bodyHash = digest(candidate.body);
+      const units = (research ? editorialUnits : bodyUnits)(commentary.body);
+      if (research && units.length > 200)
+        throw new AppError('WORKFLOW_LIMIT', 'Editorial unit budget exceeded.');
       const assessed = await this.provider.assessDraft(
         {
-          units: bodyUnits(commentary.body).map(({ id, text }) => ({
+          units: units.map(({ id, text }) => ({
             id,
             text,
           })),
-          ...(research
-            ? {
-                publicContext: {
-                  quote: research.quote,
-                  verification: 'publisher_reported' as const,
-                },
-              }
+          ...(publicEvidence
+            ? { publicEvidence: structuredClone(publicEvidence) }
             : {}),
           sources: knowledge.sources.map(({ id, excerpt }) => ({
             id,
@@ -254,24 +269,10 @@ export class DraftService {
         },
         signal,
       );
-      const result = assessBody(
-        commentary,
-        knowledge,
-        this.profile,
-        assessed.output,
-        Boolean(research),
-      );
+      const result = research
+        ? assessEditorial(commentary, knowledge, research, assessed.output)
+        : assessBody(commentary, knowledge, this.profile, assessed.output);
       assessment = { ...result.report, metadata: assessed.metadata };
-      if (research && attachment) {
-        assessment.bodyHash = digest(candidate.body);
-        assessment.publicEvidenceHash = research.evidenceHash;
-        assessment.researchPolicyVersion = RESEARCH_DRAFT_VERSION;
-        assessment.publicCitations = [attachment.citation];
-        for (const span of [...assessment.units, ...assessment.findings]) {
-          span.start += attachment.prefix.length;
-          span.end += attachment.prefix.length;
-        }
-      }
       checkAbort(signal);
       if (
         bodyHash !== digest(candidate.body) ||
@@ -286,15 +287,29 @@ export class DraftService {
           'The generated body requires factual review. Inspect its private review artifact.',
           assessment.heuristicDiagnostic,
         );
-      const grounded = groundDraft(
-        { ...commentary, warnings: candidate.warnings, claims: result.claims },
-        knowledge,
-        this.profile,
-      );
+      const grounded = research
+        ? groundingReview(
+            {
+              ...commentary,
+              warnings: candidate.warnings,
+              claims: result.claims,
+            },
+            knowledge,
+            warnings,
+          )
+        : groundDraft(
+            {
+              ...commentary,
+              warnings: candidate.warnings,
+              claims: result.claims,
+            },
+            knowledge,
+            this.profile,
+          );
       const draft = {
         ...grounded.output,
         body: candidate.body,
-        ...(attachment ? { publicCitations: [attachment.citation] } : {}),
+        ...(research ? { publicCitations: assessment.publicCitations } : {}),
         review: grounded.review,
         id: randomUUID(),
         userId: this.profile.id,
@@ -346,16 +361,16 @@ export class DraftService {
         if (candidate && generation) {
           const artifact: ReviewArtifact = {
             ...candidate,
-            ...(attachment && research
+            ...(research
               ? {
-                  publicCitations: [attachment.citation],
+                  publicCitations: assessment?.publicCitations ?? [],
                   publicEvidenceHash: research.evidenceHash,
                 }
               : {}),
-            warnings: groundDraft(
+            warnings: groundingReview(
               { body: '', warnings: candidate.warnings, claims: [] },
               knowledge,
-              this.profile,
+              research ? warnings : [],
             ).output.warnings,
             id: randomUUID(),
             userId: this.profile.id,

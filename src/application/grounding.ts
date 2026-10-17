@@ -3,6 +3,8 @@ import { AppError } from '../domain/errors.js';
 import type { GroundingDiagnostic } from '../domain/errors.js';
 import type { KnowledgeContext } from '../domain/knowledge.js';
 
+import { privateQuote } from './private-evidence.js';
+
 const normalize = (text: string): string => text.replace(/\s+/gu, ' ').trim();
 const action =
   '(?:built|led|worked|managed|launched|created|developed|delivered|implemented|designed|founded|co-founded|achieved|increased|decreased|reduced|saved|earned|won|shipped|invented|completed|served|maintained|oversaw|introduced|migrated|scaled|improved|learned|joined|graduated|studied|trained|mentored|hired|spearheaded|architected)';
@@ -70,9 +72,19 @@ export function groundDraft(
       reject({ scope: 'claim', reason: 'QUOTE_TOO_SHORT', index });
     if (text !== quote)
       reject({ scope: 'claim', reason: 'QUOTE_MISMATCH', index });
-    if (!normalize(source.excerpt).includes(quote))
+    if (!privateQuote(quote, source.excerpt))
       reject({ scope: 'claim', reason: 'QUOTE_NOT_IN_SOURCE', index });
-    if (!body.includes(text))
+    const occurrences = [
+      ...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(body),
+    ]
+      .map(({ segment }) => segment.trim())
+      .filter((segment) => segment.includes(text));
+    if (
+      occurrences.length === 0 ||
+      occurrences.some(
+        (segment) => segment.replace(/^[“"*>]+\s*|\s*[”"*]+$/gu, '') !== text,
+      )
+    )
       reject({ scope: 'claim', reason: 'CLAIM_NOT_IN_BODY', index });
     // Remove only exact attributed spans; adjacent unsupported claims remain.
     remaining = remaining.split(text).join(' ');
@@ -100,6 +112,15 @@ export function groundDraft(
       reject({ scope: 'sentence', reason: 'UNSUPPORTED_METRIC', index });
   }
 
+  return groundingReview(output, context);
+}
+
+/** Review metadata only; performs no additional grounding pass. */
+export function groundingReview(
+  output: GeneratedDraft,
+  context: KnowledgeContext,
+  requiredWarnings: readonly string[] = [],
+) {
   const limitations = [
     'Human review is required. Source attribution does not verify document truth, completeness, or every implied claim.',
     'Automated unsupported-claim checks are conservative English heuristics; review other languages and indirect claims manually.',
@@ -126,13 +147,41 @@ export function groundDraft(
   if (codes.length > 0)
     warnings.push(`Knowledge review issues: ${codes.join(', ')}.`);
 
+  warnings.push(
+    ...requiredWarnings.filter((warning) => !warnings.includes(warning)),
+  );
   return {
     output: { ...output, warnings },
     review: {
-      required: true,
+      required: true as const,
       grounding:
-        output.claims.length > 0 ? 'evidence_linked' : 'no_personal_claims',
+        output.claims.length > 0
+          ? ('evidence_linked' as const)
+          : ('no_personal_claims' as const),
       limitations,
     },
   };
+}
+
+/** Public attribution never exempts a unit from personal ownership checks. */
+export function editorialHeuristic(
+  text: string,
+  index: number,
+  publicSupported: boolean,
+): GroundingDiagnostic | undefined {
+  const experience =
+    /\b(?:I|we)\s+(?:(?:have|had|recently|personally|already)\s+){0,3}(?:used|tested|deployed|evaluated|adopted|ran|measured|tried|observed|found|discovered|experienced)\b/iu;
+  const reason =
+    personalAction.test(text) || experience.test(text)
+      ? 'UNSUPPORTED_PERSONAL_ACTION'
+      : personalRole.test(text)
+        ? 'UNSUPPORTED_PERSONAL_ROLE'
+        : !publicSupported &&
+            projectAction.test(text) &&
+            !keepRunningAdvice.test(text)
+          ? 'UNSUPPORTED_PROJECT_ACTION'
+          : !publicSupported && !text.trim().endsWith('?') && metric.test(text)
+            ? 'UNSUPPORTED_METRIC'
+            : undefined;
+  return reason ? { scope: 'sentence', reason, index } : undefined;
 }

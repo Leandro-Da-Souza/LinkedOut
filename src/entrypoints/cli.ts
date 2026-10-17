@@ -27,6 +27,21 @@ export async function runCli(
     ]),
     ...(signal ? { signal } : {}),
   };
+  if (
+    group === 'runs' &&
+    (action === 'inspect-recovery' || action === 'reconcile')
+  ) {
+    if (rest.length !== 1) throw usage();
+    return action === 'inspect-recovery'
+      ? app.recovery.inspect({ id: rest[0] }, context)
+      : app.recovery.reconcile(
+          { id: rest[0] },
+          {
+            ...context,
+            permissions: new Set([...context.permissions, 'recover_local']),
+          },
+        );
+  }
   if (group === 'research' || group === 'ideas') {
     if (group === 'ideas' && action === 'draft') {
       const { values, positionals } = readArgs(rest, {
@@ -246,7 +261,7 @@ function integerFlag(value: string): number {
 function usage(): AppError {
   return new AppError(
     'INVALID_INPUT',
-    'Usage: research run [--lookback-days 7..90 --idempotency-key KEY]|sources|items|get UUID|delete-run UUID; ideas list|get UUID|review UUID --status proposed|accepted|rejected|draft UUID [--idempotency-key KEY --audience TEXT --tone TEXT --language TEXT]; artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
+    'Usage: research run [--lookback-days 7..90 --idempotency-key KEY]|sources|items|get UUID|delete-run UUID; ideas list|get UUID|review UUID --status proposed|accepted|rejected|draft UUID [--idempotency-key KEY --audience TEXT --tone TEXT --language TEXT]; artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; runs inspect-recovery UUID|reconcile UUID; knowledge index; knowledge search --query TEXT.',
   );
 }
 

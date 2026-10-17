@@ -17,7 +17,7 @@ const context: KnowledgeContext = {
       documentId: 'document-1',
       path: 'projects/reporting.md',
       contentHash: 'test-hash',
-      excerpt: `Project notes\n${quote}\nThe tool exports reports.`,
+      excerpt: quote,
       page: null,
       startLine: 1,
     },
@@ -199,12 +199,12 @@ describe('conservative factual grounding', () => {
     ).toBe('evidence_linked');
   });
 
-  it('permits a general introduction around a verified quote', () => {
+  it('rejects an introduction attached to a quotation without a sentence boundary', () => {
     const output = draft(
       `In my work:\n“${quote}”\nWhat can we learn from thoughtful reporting?`,
       [claim()],
     );
-    expect(groundDraft(output, context, profile).review.required).toBe(true);
+    expectRejected(output);
   });
 
   it('rejects forged identifiers even when quote text is present', () => {
@@ -393,4 +393,56 @@ describe('conservative factual grounding', () => {
     expect(result.output.warnings).not.toContain('Model warning 5');
     expect(result.output.warnings.join(' ')).toContain('Human review required');
   });
+});
+
+import {
+  misleadingExcerpts,
+  personalClaim,
+} from './fixtures/private-evidence.js';
+
+it.each(misleadingExcerpts)(
+  'legacy grounding rejects private context removal from %s',
+  (excerpt) => {
+    const knowledge = {
+      ...context,
+      sources: [{ ...context.sources[0]!, excerpt }],
+    };
+    expect(() =>
+      groundDraft(
+        draft(personalClaim, [claim(personalClaim)]),
+        knowledge,
+        profile,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        groundingDiagnostic: {
+          scope: 'claim',
+          reason: 'QUOTE_NOT_IN_SOURCE',
+          index: 0,
+        },
+      }),
+    );
+  },
+);
+
+it.each([
+  'AI built the deployment pipeline.',
+  'Alex said: I built the deployment pipeline.',
+  'It is false that\nI built the deployment pipeline.',
+])('legacy grounding rejects body-side context changes: %s', (body) => {
+  const knowledge = {
+    ...context,
+    sources: [{ ...context.sources[0]!, excerpt: personalClaim }],
+  };
+  expect(() =>
+    groundDraft(draft(body, [claim(personalClaim)]), knowledge, profile),
+  ).toThrow(
+    expect.objectContaining({
+      groundingDiagnostic: {
+        scope: 'claim',
+        reason: 'CLAIM_NOT_IN_BODY',
+        index: 0,
+      },
+    }),
+  );
 });

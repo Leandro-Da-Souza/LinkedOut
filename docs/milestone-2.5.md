@@ -1,5 +1,7 @@
 # Milestone 2.5: accepted research to grounded drafts
 
+This documents the historical attachment contract. New research drafting uses [Milestone 2.6 editorial drafting](milestone-2.6.md); existing attachment records and key outcomes are preserved.
+
 An accepted content idea can initiate drafting through CLI or MCP. Acceptance expresses editorial interest and authorizes generating about that topic only. It never approves the generated draft, publishing, messaging, or any external action. Every generated draft requires human review. No publishing, scheduling, additional agent workflow, or public fetching is implemented here.
 
 ## First live accepted-idea experiment
@@ -76,7 +78,7 @@ Public evidence is never refreshed during drafting:
 - Missing, deleted, malformed, or inconsistent snapshots block generation.
 - Empty private retrieval allows commentary without personal facts; operational retrieval failures do not fall back to historical evidence.
 
-Deleting a research run retains derived drafts, blocked artifacts, execution snapshots, and frozen evidence. The deletion response lists retained derivative run/draft/artifact IDs. New drafting is impossible once the idea is deleted, but existing artifacts remain readable. Deletion is refused while a linked draft run is active/interrupted. This is logical deletion, not complete evidence erasure; existing retention limitations for SQLite free pages, backups, and request snapshots still apply.
+Deleting a research run retains derived drafts, blocked artifacts, execution snapshots, and frozen evidence. The deletion response lists retained derivative run/draft/artifact IDs. New drafting is impossible once the idea is deleted, but existing artifacts remain readable. Deletion is refused while a linked draft reservation remains running. Explicit [CLI reconciliation](interrupted-run-recovery.md) can unblock deletion only after verified local process death. This is logical deletion, not complete evidence erasure; existing retention limitations for SQLite free pages, backups, and request snapshots still apply.
 
 A blocked artifact is never a successful draft. Valid candidates are retained after invalid assessment, cancellation, review changes, or final-length failure. An overlength candidate may exceed the successful-draft 3000-character ceiling in its private artifact; it is bounded by the generation contract plus the bounded attachment and is never truncated or promoted.
 

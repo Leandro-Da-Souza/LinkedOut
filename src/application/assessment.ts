@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import {
   assessmentSchema,
   ASSESSMENT_VERSION,
+  SEGMENTATION_VERSION,
   GROUNDING_POLICY_VERSION,
 } from '../domain/assessment.js';
-import type { AssessmentReport, BodyUnit } from '../domain/assessment.js';
+import type { AssessmentReport } from '../domain/assessment.js';
 import type {
   GeneratedBody,
   GeneratedDraft,
@@ -12,23 +13,14 @@ import type {
 } from '../domain/contracts.js';
 import type { KnowledgeContext } from '../domain/knowledge.js';
 import { publicError } from '../domain/errors.js';
+import { privateQuote, isWholeSentence } from './private-evidence.js';
 import { groundDraft } from './grounding.js';
+import { sentenceUnits as bodyUnits } from './sentence-units.js';
+export { bodyUnits };
 
 export const digest = (value: unknown): string =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const normalize = (text: string): string => text.replace(/\s+/gu, ' ').trim();
-
-/** Stable UTF-16 offsets, including punctuation; every non-whitespace character is covered. */
-export function bodyUnits(body: string): BodyUnit[] {
-  return [...body.matchAll(/[^\n.!?]+(?:[.!?]+|(?=\n|$))|[.!?]+/gu)]
-    .filter((match) => match[0].trim())
-    .map((match, index) => ({
-      id: `u${index}`,
-      start: match.index,
-      end: match.index + match[0].length,
-      text: match[0],
-    }));
-}
 
 export function assessBody(
   body: GeneratedBody,
@@ -40,6 +32,7 @@ export function assessBody(
   const units = bodyUnits(body.body);
   const report: AssessmentReport = {
     version: ASSESSMENT_VERSION,
+    segmentationVersion: SEGMENTATION_VERSION,
     policyVersion: GROUNDING_POLICY_VERSION,
     bodyHash: digest(body.body),
     knowledgeHash: digest(knowledge),
@@ -118,7 +111,8 @@ export function assessBody(
             ? 'unsupported'
             : !source ||
                 normalize(evidence.quote).length < 12 ||
-                !normalize(source.excerpt).includes(normalize(evidence.quote))
+                !privateQuote(evidence.quote, source.excerpt) ||
+                !isWholeSentence(body.body, unit.start, unit.end)
               ? 'invalid_reference'
               : normalize(unit.text).length >= 12 &&
                   normalize(unit.text) === normalize(evidence.quote)

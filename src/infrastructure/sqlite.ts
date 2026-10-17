@@ -1,3 +1,6 @@
+import { LinuxProcessInspector } from './process-identity.js';
+import { processOwnerSchema } from '../domain/recovery.js';
+import type { ProcessInspector, ProcessOwner } from '../domain/recovery.js';
 import type { ResearchDraftContext } from '../domain/research-draft.js';
 import type {
   ContentIdea,
@@ -18,7 +21,7 @@ export interface Run {
   userId: string;
   kind: 'draft' | 'agent' | 'research';
   actor: ExecutionContext['actor'];
-  status: 'running' | 'succeeded' | 'failed';
+  status: 'running' | 'succeeded' | 'failed' | 'interrupted';
   createdAt: string;
   finishedAt: string | null;
   parentRunId: string | null;
@@ -98,11 +101,33 @@ const migrations = [
     acceptance_revision INTEGER NOT NULL, evidence_hash TEXT NOT NULL
   );
   CREATE INDEX research_draft_origin ON research_draft_links(user_id, research_run_id);`,
+  `ALTER TABLE runs ADD COLUMN owner_json TEXT;
+  CREATE TRIGGER immutable_run_owner BEFORE UPDATE OF owner_json ON runs
+    BEGIN SELECT RAISE(ABORT, 'Immutable execution owner'); END;
+  CREATE TABLE run_reconciliations (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+    user_id TEXT NOT NULL, previous_state TEXT NOT NULL CHECK(previous_state = 'running'),
+    resulting_state TEXT NOT NULL CHECK(resulting_state = 'interrupted'),
+    observed_at TEXT NOT NULL, reconciled_at TEXT NOT NULL,
+    initiator_instance_id TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('PROCESS_ABSENT','PID_REUSED'))
+  );
+  CREATE TRIGGER immutable_reconciliation_update BEFORE UPDATE ON run_reconciliations
+    BEGIN SELECT RAISE(ABORT, 'Immutable reconciliation'); END;
+  CREATE TRIGGER immutable_reconciliation_delete BEFORE DELETE ON run_reconciliations
+    BEGIN SELECT RAISE(ABORT, 'Immutable reconciliation'); END;`,
 ];
 
 export class SqliteStore {
-  private readonly db: DatabaseSync;
-  constructor(dataDir: string) {
+  private readonly db!: DatabaseSync;
+  private readonly owner: ProcessOwner;
+  private readonly ownerJson: string;
+  constructor(
+    dataDir: string,
+    private readonly inspector: ProcessInspector = new LinuxProcessInspector(),
+  ) {
+    this.owner = inspector.capture();
+    this.ownerJson = JSON.stringify(this.owner);
     try {
       mkdirSync(dataDir, { recursive: true, mode: 0o700 });
       const file = join(dataDir, 'linkedout.sqlite');
@@ -126,6 +151,11 @@ export class SqliteStore {
         }
       });
     } catch (error) {
+      try {
+        this.db?.close();
+      } catch {
+        /* Preserve the opening/migration error. */
+      }
       if (error instanceof AppError) throw error;
       throw new AppError(
         'STORAGE_ERROR',
@@ -155,16 +185,146 @@ export class SqliteStore {
       throw new AppError('STORAGE_ERROR', 'Local storage operation failed.');
     }
   }
+  private assertOne(result: { changes: number | bigint }): void {
+    if (Number(result.changes) !== 1)
+      throw new AppError(
+        'EXECUTION_STATE_CONFLICT',
+        'Execution ownership or state changed. No payload was committed.',
+      );
+  }
+  private assertOwnedRunning(
+    runId: string,
+    userId?: string,
+    kind?: Run['kind'],
+  ): string {
+    const row = this.db
+      .prepare(
+        `SELECT r.user_id FROM runs r JOIN tool_executions e ON e.run_id = r.id
+      WHERE r.id = ? AND r.owner_json = ? AND r.status = 'running' AND e.status = 'running'
+      AND e.user_id = r.user_id AND (? IS NULL OR r.user_id = ?) AND (? IS NULL OR r.kind = ?)`,
+      )
+      .get(
+        runId,
+        this.ownerJson,
+        userId ?? null,
+        userId ?? null,
+        kind ?? null,
+        kind ?? null,
+      );
+    if (!row)
+      throw new AppError(
+        'EXECUTION_STATE_CONFLICT',
+        'Execution ownership or state changed. No payload was committed.',
+      );
+    return String(row['user_id']);
+  }
+  inspectRecovery(userId: string, runId: string) {
+    return this.guarded(() => {
+      const run = this.getRun(userId, runId);
+      const row = this.db
+        .prepare('SELECT owner_json FROM runs WHERE id = ? AND user_id = ?')
+        .get(runId, userId)!;
+      let owner: ProcessOwner | null = null;
+      try {
+        owner = processOwnerSchema.parse(JSON.parse(String(row['owner_json'])));
+      } catch {
+        /* Legacy or invalid metadata is unknown. */
+      }
+      const observation =
+        run.status === 'running' ? this.inspector.inspect(owner) : null;
+      const event =
+        this.db
+          .prepare(
+            'SELECT * FROM run_reconciliations WHERE run_id = ? AND user_id = ?',
+          )
+          .get(runId, userId) ?? null;
+      const linkedRunIds = this.db
+        .prepare(
+          `SELECT run_id FROM research_draft_links WHERE user_id = ? AND research_run_id = ?
+        UNION SELECT id AS run_id FROM runs WHERE user_id = ? AND parent_run_id = ?`,
+        )
+        .all(userId, runId, userId, runId)
+        .map((r) => String(r['run_id']));
+      return {
+        runId,
+        status: run.status,
+        observation,
+        eligible: observation?.state === 'abandoned',
+        parentRunId: run.parentRunId,
+        linkedRunIds,
+        event,
+      };
+    });
+  }
+  reconcileRun(userId: string, runId: string) {
+    return this.guarded(() =>
+      this.transaction(() => {
+        // Inspection is repeated inside the writer transaction, never trusted from a CLI preview.
+        const inspection = this.inspectRecovery(userId, runId);
+        if (inspection.status !== 'running')
+          return { ...inspection, changed: false };
+        const proof = inspection.observation!;
+        if (proof.state !== 'abandoned')
+          throw new AppError(
+            'RECOVERY_UNSAFE',
+            'The original process is active or its death cannot be established. Reservation retained.',
+          );
+        const row = this.db
+          .prepare(
+            `SELECT 1 FROM runs r JOIN tool_executions e ON e.run_id = r.id
+        WHERE r.id = ? AND r.user_id = ? AND e.user_id = r.user_id AND r.status = 'running' AND e.status = 'running'`,
+          )
+          .get(runId, userId);
+        if (!row)
+          throw new AppError(
+            'EXECUTION_STATE_CONFLICT',
+            'Execution records disagree. Reservation retained.',
+          );
+        const now = new Date().toISOString();
+        this.assertOne(
+          this.db
+            .prepare(
+              "UPDATE runs SET status = 'failed', error_code = 'INTERRUPTED', finished_at = ? WHERE id = ? AND user_id = ? AND status = 'running'",
+            )
+            .run(now, runId, userId),
+        );
+        this.assertOne(
+          this.db
+            .prepare(
+              "UPDATE tool_executions SET status = 'failed', error_code = 'INTERRUPTED' WHERE run_id = ? AND user_id = ? AND status = 'running'",
+            )
+            .run(runId, userId),
+        );
+        this.db
+          .prepare(
+            `INSERT INTO run_reconciliations (id, run_id, user_id, previous_state, resulting_state, observed_at, reconciled_at, initiator_instance_id, reason)
+        VALUES (?, ?, ?, 'running', 'interrupted', ?, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            runId,
+            userId,
+            proof.observedAt,
+            now,
+            this.owner.instanceId,
+            proof.reason,
+          );
+        return { ...this.inspectRecovery(userId, runId), changed: true };
+      }),
+    );
+  }
   private insertRun(
     userId: string,
     kind: Run['kind'],
     context: ExecutionContext,
   ): string {
+    if (context.parentRunId)
+      this.assertOwnedRunning(context.parentRunId, userId, 'agent');
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO runs (id, user_id, kind, actor, status, created_at, parent_run_id)
-      VALUES (?, ?, ?, ?, 'running', ?, ?)`,
+        `INSERT INTO runs (id, user_id, kind, actor, status, created_at, parent_run_id, owner_json)
+      VALUES (?, ?, ?, ?, 'running', ?, ?, ?)`,
       )
       .run(
         id,
@@ -173,6 +333,7 @@ export class SqliteStore {
         context.actor,
         new Date().toISOString(),
         context.parentRunId ?? null,
+        this.ownerJson,
       );
     return id;
   }
@@ -205,7 +366,9 @@ export class SqliteStore {
             if (previous['status'] === 'failed')
               throw new AppError(
                 'PREVIOUS_FAILURE',
-                'Research previously failed. Use a new key for deliberate retry.',
+                previous['error_code'] === 'INTERRUPTED'
+                  ? 'The local research execution was interrupted. Remote outcome and billing are unknown. This key cannot restart work.'
+                  : 'Research previously failed. Use a new key for deliberate retry.',
                 previous['grounding_diagnostic_json']
                   ? groundingDiagnosticSchema.parse(
                       JSON.parse(String(previous['grounding_diagnostic_json'])),
@@ -247,6 +410,18 @@ export class SqliteStore {
       }),
     );
   }
+  researchCacheFor(userId: string, runId: string) {
+    return {
+      getResearchCache: (key: string) => this.getResearchCache(key),
+      setResearchCache: (key: string, value: unknown) =>
+        this.guarded(() =>
+          this.transaction(() => {
+            this.assertOwnedRunning(runId, userId, 'research');
+            this.setResearchCache(key, value);
+          }),
+        ),
+    };
+  }
   getResearchCache(key: string): unknown {
     return this.guarded(() => {
       const row = this.db
@@ -272,8 +447,9 @@ export class SqliteStore {
     runId: string,
   ): ResearchItem[] {
     return this.guarded(() =>
-      this.transaction(() =>
-        items.map((item) => {
+      this.transaction(() => {
+        this.assertOwnedRunning(runId, userId, 'research');
+        return items.map((item) => {
           this.db
             .prepare(
               'INSERT OR IGNORE INTO research_items (id, user_id, identity, content_hash, retrieved_at, item_json) VALUES (?, ?, ?, ?, ?, ?)',
@@ -303,8 +479,8 @@ export class SqliteStore {
             )
             .run(runId, current.id);
           return current;
-        }),
-      ),
+        });
+      }),
     );
   }
   researchIdentitySeen(userId: string, identity: string): boolean {
@@ -319,6 +495,7 @@ export class SqliteStore {
   completeResearch(userId: string, result: ResearchResult): void {
     this.guarded(() =>
       this.transaction(() => {
+        this.assertOwnedRunning(result.runId, userId, 'research');
         // A concurrent run may have proposed the same release after initial selection.
         result.ideas = result.ideas.filter(
           (idea) => !this.researchIdentitySeen(userId, idea.identity),
@@ -342,28 +519,32 @@ export class SqliteStore {
             'INSERT INTO research_results (run_id, user_id, result_json) VALUES (?, ?, ?)',
           )
           .run(result.runId, userId, JSON.stringify(result));
-        this.db
-          .prepare(
-            "UPDATE runs SET status = 'succeeded', finished_at = ?, research_result_id = ?, planning_json = ? WHERE id = ? AND status = 'running'",
-          )
-          .run(
-            new Date().toISOString(),
-            result.runId,
-            JSON.stringify({
-              coverage: result.coverage,
-              ideaCount: result.ideas.length,
-              requests: result.requests,
-              modelCalls: result.modelCalls,
-              outcomes: result.outcomes,
-              generation: result.generation,
-            }),
-            result.runId,
-          );
-        this.db
-          .prepare(
-            "UPDATE tool_executions SET status = 'succeeded', research_result_id = ? WHERE run_id = ? AND status = 'running'",
-          )
-          .run(result.runId, result.runId);
+        this.assertOne(
+          this.db
+            .prepare(
+              "UPDATE runs SET status = 'succeeded', finished_at = ?, research_result_id = ?, planning_json = ? WHERE id = ? AND status = 'running'",
+            )
+            .run(
+              new Date().toISOString(),
+              result.runId,
+              JSON.stringify({
+                coverage: result.coverage,
+                ideaCount: result.ideas.length,
+                requests: result.requests,
+                modelCalls: result.modelCalls,
+                outcomes: result.outcomes,
+                generation: result.generation,
+              }),
+              result.runId,
+            ),
+        );
+        this.assertOne(
+          this.db
+            .prepare(
+              "UPDATE tool_executions SET status = 'succeeded', research_result_id = ? WHERE run_id = ? AND status = 'running'",
+            )
+            .run(result.runId, result.runId),
+        );
       }),
     );
   }
@@ -523,7 +704,7 @@ export class SqliteStore {
         if (run.status === 'running')
           throw new AppError(
             'IN_PROGRESS',
-            'Cannot delete an active or interrupted research run.',
+            'Cannot delete a running research reservation. Inspect recovery eligibility first.',
           );
         const derivatives = this.db
           .prepare(
@@ -533,7 +714,7 @@ export class SqliteStore {
         if (derivatives.some((row) => row['status'] === 'running'))
           throw new AppError(
             'IN_PROGRESS',
-            'A linked drafting run is active or interrupted. Research cannot be deleted.',
+            'A linked drafting run has a running reservation. Research cannot be deleted before safe reconciliation.',
           );
         this.db
           .prepare('DELETE FROM content_ideas WHERE user_id = ? AND run_id = ?')
@@ -578,9 +759,10 @@ export class SqliteStore {
       }),
     );
   }
-  pruneResearch(userId: string, before: string): void {
+  pruneResearch(userId: string, before: string, runId: string): void {
     this.guarded(() =>
       this.transaction(() => {
+        this.assertOwnedRunning(runId, userId, 'research');
         this.db
           .prepare(
             'DELETE FROM research_items WHERE user_id = ? AND retrieved_at < ? AND id NOT IN (SELECT item_id FROM content_ideas)',
@@ -611,6 +793,7 @@ export class SqliteStore {
     key: string | undefined,
     context: ExecutionContext,
     origin?: ResearchDraftContext,
+    legacyResearchHash?: string,
   ): { runId: string; draft?: Draft } {
     return this.reserveRun(
       'draft',
@@ -620,6 +803,7 @@ export class SqliteStore {
       key,
       context,
       origin,
+      legacyResearchHash,
     );
   }
   private reserveRun(
@@ -630,6 +814,7 @@ export class SqliteStore {
     key: string | undefined,
     context: ExecutionContext,
     origin?: ResearchDraftContext,
+    legacyResearchHash?: string,
   ): { runId: string; draft?: Draft } {
     return this.guarded(() =>
       this.transaction(() => {
@@ -641,7 +826,25 @@ export class SqliteStore {
             )
             .get(userId, key);
           if (previous) {
-            if (previous['request_hash'] !== requestHash)
+            const historicalMatch =
+              origin &&
+              legacyResearchHash &&
+              previous['request_hash'] === legacyResearchHash &&
+              Boolean(
+                this.db
+                  .prepare(
+                    'SELECT 1 FROM research_draft_links WHERE run_id = ? AND user_id = ? AND idea_id = ? AND research_run_id = ? AND acceptance_revision = ? AND evidence_hash = ?',
+                  )
+                  .get(
+                    previous['run_id'] as string,
+                    userId,
+                    origin.ideaId,
+                    origin.researchRunId,
+                    origin.acceptanceRevision,
+                    origin.evidenceHash,
+                  ),
+              );
+            if (previous['request_hash'] !== requestHash && !historicalMatch)
               throw new AppError(
                 'IDEMPOTENCY_CONFLICT',
                 'This key was used with different input, preferences, or generation settings.',
@@ -654,7 +857,9 @@ export class SqliteStore {
             if (previous['status'] === 'failed')
               throw new AppError(
                 'PREVIOUS_FAILURE',
-                'The original request failed. Inspect its run; use a new key for a deliberate retry.',
+                previous['error_code'] === 'INTERRUPTED'
+                  ? 'The local execution was interrupted. Remote outcome and billing are unknown. This key cannot restart work.'
+                  : 'The original request failed. Inspect its run; use a new key for a deliberate retry.',
                 undefined,
                 previous['review_artifact_id']
                   ? String(previous['review_artifact_id'])
@@ -699,14 +904,20 @@ export class SqliteStore {
   }
   recordPlan(runId: string, planning: unknown): void {
     this.guarded(() =>
-      this.db
-        .prepare('UPDATE runs SET planning_json = ? WHERE id = ?')
-        .run(JSON.stringify(planning), runId),
+      this.transaction(() => {
+        this.assertOwnedRunning(runId);
+        this.assertOne(
+          this.db
+            .prepare('UPDATE runs SET planning_json = ? WHERE id = ?')
+            .run(JSON.stringify(planning), runId),
+        );
+      }),
     );
   }
   completeDraft(draft: Draft, validateResearch?: () => void): void {
     this.guarded(() =>
       this.transaction(() => {
+        this.assertOwnedRunning(draft.runId, draft.userId, 'draft');
         if (draft.provenance.research) {
           this.assertResearchAcceptance(
             draft.userId,
@@ -730,19 +941,40 @@ export class SqliteStore {
     );
   }
   completeAgent(runId: string, draftId: string): void {
-    this.guarded(() => this.transaction(() => this.finishRun(runId, draftId)));
+    this.guarded(() =>
+      this.transaction(() => {
+        const userId = this.assertOwnedRunning(runId, undefined, 'agent');
+        const child = this.db
+          .prepare(
+            `SELECT 1 FROM drafts d JOIN runs r ON r.id = d.run_id
+        WHERE d.id = ? AND d.user_id = ? AND r.parent_run_id = ? AND r.status = 'succeeded'`,
+          )
+          .get(draftId, userId, runId);
+        if (!child)
+          throw new AppError(
+            'EXECUTION_STATE_CONFLICT',
+            'Agent result must belong to its completed child.',
+          );
+        this.finishRun(runId, draftId);
+      }),
+    );
   }
   private finishRun(runId: string, draftId: string): void {
-    this.db
-      .prepare(
-        "UPDATE runs SET status = 'succeeded', finished_at = ?, draft_id = ? WHERE id = ? AND status = 'running'",
-      )
-      .run(new Date().toISOString(), draftId, runId);
-    this.db
-      .prepare(
-        "UPDATE tool_executions SET status = 'succeeded', draft_id = ? WHERE run_id = ? AND status = 'running'",
-      )
-      .run(draftId, runId);
+    this.assertOwnedRunning(runId);
+    this.assertOne(
+      this.db
+        .prepare(
+          "UPDATE runs SET status = 'succeeded', finished_at = ?, draft_id = ? WHERE id = ? AND status = 'running'",
+        )
+        .run(new Date().toISOString(), draftId, runId),
+    );
+    this.assertOne(
+      this.db
+        .prepare(
+          "UPDATE tool_executions SET status = 'succeeded', draft_id = ? WHERE run_id = ? AND status = 'running'",
+        )
+        .run(draftId, runId),
+    );
   }
   failRun(
     runId: string,
@@ -767,6 +999,25 @@ export class SqliteStore {
     diagnostic?: GroundingDiagnostic,
     reviewArtifactId?: string,
   ): void {
+    const userId = this.assertOwnedRunning(runId);
+    if (code === 'INTERRUPTED')
+      throw new AppError(
+        'EXECUTION_STATE_CONFLICT',
+        'Interruption requires explicit reconciliation.',
+      );
+    if (
+      reviewArtifactId &&
+      !this.db
+        .prepare(
+          `SELECT 1 FROM review_artifacts a JOIN runs r ON r.id = a.run_id
+      WHERE a.id = ? AND a.user_id = ? AND (a.run_id = ? OR r.parent_run_id = ?)`,
+        )
+        .get(reviewArtifactId, userId, runId, runId)
+    )
+      throw new AppError(
+        'EXECUTION_STATE_CONFLICT',
+        'Artifact must belong to this execution or its child.',
+      );
     // Runtime allowlisting strips extra properties; never serialize arbitrary
     // errors, rejected text, source IDs, or provider-supplied fields.
     const parsed = groundingDiagnosticSchema.safeParse(diagnostic);
@@ -779,17 +1030,19 @@ export class SqliteStore {
     const finishedAt = new Date().toISOString();
     for (const table of ['runs', 'tool_executions'] as const) {
       const key = table === 'runs' ? 'id' : 'run_id';
-      this.db
-        .prepare(
-          `UPDATE ${table} SET status = 'failed', ${table === 'runs' ? 'finished_at = ?,' : ''} error_code = ?, grounding_diagnostic_json = ?, review_artifact_id = ? WHERE ${key} = ? AND status = 'running'`,
-        )
-        .run(
-          ...(table === 'runs' ? [finishedAt] : []),
-          code,
-          diagnosticJson,
-          reviewArtifactId ?? null,
-          runId,
-        );
+      this.assertOne(
+        this.db
+          .prepare(
+            `UPDATE ${table} SET status = 'failed', ${table === 'runs' ? 'finished_at = ?,' : ''} error_code = ?, grounding_diagnostic_json = ?, review_artifact_id = ? WHERE ${key} = ? AND status = 'running'`,
+          )
+          .run(
+            ...(table === 'runs' ? [finishedAt] : []),
+            code,
+            diagnosticJson,
+            reviewArtifactId ?? null,
+            runId,
+          ),
+      );
     }
   }
   failWithArtifact(
@@ -798,16 +1051,7 @@ export class SqliteStore {
   ): void {
     this.guarded(() =>
       this.transaction(() => {
-        const run = this.db
-          .prepare(
-            "SELECT id FROM runs WHERE id = ? AND user_id = ? AND status = 'running'",
-          )
-          .get(artifact.runId, artifact.userId);
-        if (!run)
-          throw new AppError(
-            'STORAGE_ERROR',
-            'Cannot attach artifact to a completed or missing run.',
-          );
+        this.assertOwnedRunning(artifact.runId, artifact.userId, 'draft');
         this.db
           .prepare(
             'INSERT INTO review_artifacts (id, user_id, run_id, created_at, revision, parent_revision_id, artifact_json) VALUES (?, ?, ?, ?, 1, NULL, ?)',
@@ -975,7 +1219,10 @@ export class SqliteStore {
       userId: String(row['user_id']),
       kind: row['kind'] as Run['kind'],
       actor: row['actor'] as Run['actor'],
-      status: row['status'] as Run['status'],
+      status:
+        row['status'] === 'failed' && row['error_code'] === 'INTERRUPTED'
+          ? 'interrupted'
+          : (row['status'] as Run['status']),
       createdAt: String(row['created_at']),
       finishedAt: row['finished_at'] as string | null,
       parentRunId: row['parent_run_id'] as string | null,

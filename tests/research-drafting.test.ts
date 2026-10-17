@@ -16,9 +16,11 @@ import { DraftService } from '../src/application/drafting.js';
 import {
   resolveResearchDraft,
   researchAttachment,
+  publicEvidenceProjection,
 } from '../src/application/research-drafting.js';
 import { digest } from '../src/application/assessment.js';
 import { GithubResearchFeed } from '../src/infrastructure/github-research.js';
+import { LinuxProcessInspector } from '../src/infrastructure/process-identity.js';
 import { SqliteStore } from '../src/infrastructure/sqlite.js';
 import { userProfileSchema } from '../src/domain/contracts.js';
 import type {
@@ -61,8 +63,11 @@ async function setup() {
       output: {
         units: request.units.map((unit) => ({
           id: unit.id,
-          category: 'advice_opinion_question',
-          evidence: null,
+          category: 'opinion_advice_question',
+          evidenceKind: 'none',
+          privateSourceIndex: null,
+          support: 'not_applicable',
+          reason: null,
         })),
       },
       metadata,
@@ -144,11 +149,17 @@ describe('accepted research to shared drafting', () => {
       ideaId: f.idea.id,
       acceptanceRevision: 1,
     });
-    const citation = draft.publicCitations![0]!;
-    expect(draft.body.slice(citation.quoteStart, citation.quoteEnd)).toBe(
-      f.idea.publicEvidence.quote,
+    expect(draft.publicCitations).toEqual([]);
+    expect(draft.body).not.toContain('Publisher report:');
+    const generatedRequest = vi.mocked(f.provider.generateDraft).mock
+      .calls[0]![0];
+    const assessedRequest = vi.mocked(f.provider.assessDraft).mock.calls[0]![0];
+    expect(generatedRequest.publicEvidence).toEqual(
+      assessedRequest.publicEvidence,
     );
-    expect(citation.kind).toBe('research_attachment');
+    expect(assessedRequest.publicEvidence).toEqual(
+      publicEvidenceProjection(draft.provenance.research!),
+    );
     expect(draft.claims).toEqual([]);
     expect(draft.assessment?.bodyHash).toBe(digest(draft.body));
     expect(draft.body.slice(draft.assessment!.units[0]!.start)).toBe(
@@ -295,7 +306,15 @@ describe('accepted research to shared drafting', () => {
       excerpt: 'New TypeScript content that changes the source.',
       retrievedAt: new Date(Date.now() + 1000).toISOString(),
     };
-    f.app.store.saveResearchItems('local', [newer], f.result.runId);
+    const observation = f.app.store.reserveResearch(
+      'local',
+      'new-observation',
+      {},
+      undefined,
+      context,
+    );
+    f.app.store.saveResearchItems('local', [newer], observation.runId);
+    f.app.store.failRun(observation.runId, 'CANCELLED');
     const second = await invoke(f, 'new-key');
     expect(second.draft.warnings.join(' ')).toContain('more recently observed');
     expect(second.draft.publicCitations).toEqual(first.draft.publicCitations);
@@ -321,7 +340,10 @@ describe('accepted research to shared drafting', () => {
         units: request.units.map((unit) => ({
           id: unit.id,
           category: 'personal_fact',
-          evidence: { sourceId: knowledge.sources[0]!.id, quote: unit.text },
+          evidenceKind: 'private',
+          privateSourceIndex: 0,
+          support: 'supported',
+          reason: null,
         })),
       },
       metadata,
@@ -329,7 +351,7 @@ describe('accepted research to shared drafting', () => {
     const input = { ideaId: f.idea.id, idempotencyKey: 'private' };
     const first = await service.createFromIdea(input, context);
     expect(first.draft.claims).toHaveLength(1);
-    expect(first.draft.publicCitations).toHaveLength(1);
+    expect(first.draft.publicCitations).toHaveLength(0);
     expect(first.draft.provenance.knowledge?.sources[0]?.id).toBe(
       'synthetic-source',
     );
@@ -341,8 +363,8 @@ describe('accepted research to shared drafting', () => {
   });
   it.each([
     'personal_fact',
-    'general_fact',
-    'advice_opinion_question',
+    'publisher_claim',
+    'opinion_advice_question',
   ] as const)(
     'retains public-to-personal claims classified as %s as blocked artifacts',
     async (category) => {
@@ -359,10 +381,14 @@ describe('accepted research to shared drafting', () => {
           units: request.units.map((unit) => ({
             id: unit.id,
             category,
-            evidence:
-              category === 'advice_opinion_question'
-                ? null
-                : { sourceId: f.idea.itemId, quote: unit.text },
+            evidenceKind:
+              category === 'opinion_advice_question' ? 'none' : 'public',
+            privateSourceIndex: null,
+            support:
+              category === 'opinion_advice_question'
+                ? 'not_applicable'
+                : 'supported',
+            reason: null,
           })),
         },
         metadata,
@@ -382,7 +408,7 @@ describe('accepted research to shared drafting', () => {
         publishable: false,
         status: 'blocked',
         reviewRequired: true,
-        publicCitations: [{ verification: 'publisher_reported' }],
+        publicEvidenceHash: expect.any(String),
       });
       expect(artifact.bodyHash).toBe(digest(artifact.body));
       expect(f.app.store.listDrafts('local').total).toBe(0);
@@ -431,10 +457,85 @@ describe('accepted research to shared drafting', () => {
     await expect(invoke(f)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(f.provider.generateDraft).toHaveBeenCalledTimes(1);
   });
-  it('retains overlength candidates and invalid assessments, without a successful draft', async () => {
+  it('deletes research only after reconciliation and retains all derivative evidence and lineage', async () => {
+    const f = await setup();
+    const completed = await invoke(f);
+    vi.mocked(f.provider.assessDraft).mockResolvedValueOnce({
+      output: { units: [] },
+      metadata,
+    });
+    await expect(invoke(f, 'blocked')).rejects.toMatchObject({
+      code: 'UNGROUNDED_OUTPUT',
+    });
+    const blockedId = f.app.store.listReviewArtifacts('local').artifacts[0]!.id;
+    const blocked = f.app.store.getReviewArtifact('local', blockedId);
+    const origin = resolveResearchDraft(
+      f.app.store,
+      'local',
+      f.idea.id,
+    ).research;
+    const pending = f.app.store.reserveDraft(
+      'local',
+      'pending',
+      { private: 'synthetic derivative snapshot' },
+      'pending',
+      context,
+      origin,
+    );
+    expect(() =>
+      f.app.store.deleteResearchRun('local', f.result.runId),
+    ).toThrow(expect.objectContaining({ code: 'IN_PROGRESS' }));
+    const inspector = new LinuxProcessInspector();
+    const maintenance = new SqliteStore(f.dir, {
+      capture: () => inspector.capture(),
+      inspect: () => ({
+        state: 'abandoned',
+        reason: 'PROCESS_ABSENT',
+        observedAt: new Date().toISOString(),
+      }),
+    });
+    cleanup.push(() => maintenance.close());
+    maintenance.reconcileRun('local', pending.runId);
+    expect(() => f.app.store.failRun(pending.runId, 'CANCELLED')).toThrow(
+      expect.objectContaining({ code: 'EXECUTION_STATE_CONFLICT' }),
+    );
+    const deleted = maintenance.deleteResearchRun('local', f.result.runId);
+    expect(deleted.retainedDerivatives).toHaveLength(3);
+    expect(deleted.retainedDerivatives).toContainEqual({
+      runId: pending.runId,
+      draftId: null,
+      reviewArtifactId: null,
+    });
+    expect(maintenance.getDraft('local', completed.draft.id)).toEqual(
+      completed.draft,
+    );
+    expect(maintenance.getReviewArtifact('local', blockedId)).toEqual(blocked);
+    expect(maintenance.getRun('local', pending.runId)).toMatchObject({
+      status: 'interrupted',
+      researchOrigin: { researchRunId: f.result.runId },
+    });
+    const db = new DatabaseSync(join(f.dir, 'linkedout.sqlite'));
+    try {
+      expect(
+        db
+          .prepare('SELECT request_json FROM tool_executions WHERE run_id = ?')
+          .get(pending.runId)?.request_json,
+      ).toContain('synthetic derivative snapshot');
+      expect(
+        db.prepare('SELECT count(*) n FROM run_reconciliations').get()?.n,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+    await expect(invoke(f, 'after-deletion')).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    expect(f.provider.generateDraft).toHaveBeenCalledTimes(2);
+  });
+  it('retains valid bodies on invalid generation fields and invalid assessments', async () => {
     const f = await setup();
     vi.mocked(f.provider.generateDraft).mockResolvedValueOnce({
-      output: { body: 'x'.repeat(2990), warnings: [] },
+      output: { body: 'x'.repeat(2990), warnings: [], approved: true },
       metadata,
     });
     await expect(invoke(f)).rejects.toMatchObject({
@@ -473,7 +574,8 @@ describe('accepted research to shared drafting', () => {
       f.app.store.listRuns('local').find((run) => run.kind === 'draft')!
         .reviewArtifactId!,
     );
-    expect(artifact.body).toContain('Publisher report:');
+    expect(artifact.body).toBe('What would you evaluate before adopting this?');
+    expect(artifact.provenance.research).toBeDefined();
   });
   it('renders Unicode/multiline quotations exactly without model-controlled spans', async () => {
     const f = await setup();
@@ -504,7 +606,7 @@ it('migrates accepted v4 ideas with original planning-only policies without inve
     'n'
   ];
   f.db.exec(
-    'DROP TABLE research_draft_links; ALTER TABLE content_ideas DROP COLUMN review_revision; PRAGMA user_version = 4;',
+    'DROP TRIGGER immutable_run_owner; DROP TABLE run_reconciliations; ALTER TABLE runs DROP COLUMN owner_json; DROP TABLE research_draft_links; ALTER TABLE content_ideas DROP COLUMN review_revision; PRAGMA user_version = 4;',
   );
   const reopened = new SqliteStore(f.dir);
   cleanup.push(() => reopened.close());
@@ -558,7 +660,7 @@ it('atomically rolls back failed successful completion and retains a blocked art
   expect(
     f.app.store.getReviewArtifact('local', run.reviewArtifactId!)
       .publicCitations,
-  ).toHaveLength(1);
+  ).toHaveLength(0);
 });
 
 it('excludes historical private quotations from current generation and preserves the warning', async () => {
@@ -615,4 +717,211 @@ it('rechecks acceptance after retrieval and conflicts with existing research key
   await expect(invoke(f, 'shared-research')).rejects.toMatchObject({
     code: 'IDEMPOTENCY_CONFLICT',
   });
+});
+
+it('stores editorial prose with application citations and frozen evidence, never a quote prefix', async () => {
+  const f = await setup();
+  const body =
+    'TypeScript reports support for synthetic projects.\n\nI would start with a small migration experiment.';
+  vi.mocked(f.provider.generateDraft).mockResolvedValue({
+    output: { body, warnings: [] },
+    metadata,
+  });
+  vi.mocked(f.provider.assessDraft).mockImplementation(async (request) => ({
+    output: {
+      units: request.units.map((u, index) => ({
+        id: u.id,
+        category: index === 0 ? 'publisher_claim' : 'opinion_advice_question',
+        evidenceKind: index === 0 ? 'public' : 'none',
+        privateSourceIndex: null,
+        support: index === 0 ? 'supported' : 'not_applicable',
+        reason: null,
+      })),
+    },
+    metadata,
+  }));
+  const result = await invoke(f);
+  expect(result.draft.body).toBe(body);
+  expect(result.draft.publicCitations).toHaveLength(1);
+  const citation = result.draft.publicCitations![0]!;
+  expect(citation).toMatchObject({
+    kind: 'research_claim',
+    itemId: f.idea.itemId,
+    publicEvidenceHash: result.draft.provenance.research!.evidenceHash,
+  });
+  expect(body.slice(citation.start, citation.end).trim()).toBe(
+    'TypeScript reports support for synthetic projects.',
+  );
+  expect(result.draft.claims).toEqual([]);
+  expect(result.draft.review?.required).toBe(true);
+  expect(result.draft.assessment?.blocked).toBe(false);
+  const reopened = new SqliteStore(f.dir);
+  cleanup.push(() => reopened.close());
+  expect(reopened.getDraft('local', result.draft.id)).toEqual(result.draft);
+  expect(f.provider.generateDraft).toHaveBeenCalledTimes(1);
+  expect(f.provider.assessDraft).toHaveBeenCalledTimes(1);
+});
+
+// Recreate the old persisted wire shape and exact hash, independently of the new
+// service's compatibility builder. No production or personal data is used.
+async function historicalExecution(status: 'succeeded' | 'failed' | 'running') {
+  const f = await setup();
+  const current = await invoke(f, 'historical');
+  const research = current.draft.provenance.research!;
+  const attachment = researchAttachment(research);
+  const legacyRequest = {
+    input: current.draft.provenance.input,
+    profile: current.draft.provenance.profile,
+    knowledge: current.draft.provenance.knowledge,
+    research,
+    commentaryLimit: 3000 - attachment.prefix.length,
+  };
+  const hash = digest({
+    request: legacyRequest,
+    provider: 'fixture',
+    model: 'fixture',
+    promptVersion:
+      'research-draft-v1-attachment:draft-v5-separated-facts:assessment-v2:whole-unit-attribution-v2',
+  });
+  const historical = {
+    ...current.draft,
+    body: attachment.prefix + current.draft.body,
+    promptVersion: 'research-draft-v1-attachment',
+    publicCitations: [attachment.citation],
+    assessment: {
+      ...current.draft.assessment!,
+      version: 'assessment-v2',
+      policyVersion: 'whole-unit-attribution-v2',
+    },
+  };
+  f.db
+    .prepare('UPDATE drafts SET draft_json = ? WHERE id = ?')
+    .run(JSON.stringify(historical), current.draft.id);
+  f.db
+    .prepare(
+      'UPDATE tool_executions SET request_hash = ?, request_json = ?, status = ? WHERE run_id = ?',
+    )
+    .run(hash, JSON.stringify(legacyRequest), status, current.draft.runId);
+  f.db
+    .prepare('UPDATE runs SET status = ? WHERE id = ?')
+    .run(status, current.draft.runId);
+  vi.mocked(f.provider.generateDraft).mockClear();
+  vi.mocked(f.provider.assessDraft).mockClear();
+  return { f, historical };
+}
+
+it('replays the unchanged historical draft across restart without reassessment or rewriting', async () => {
+  const { f, historical } = await historicalExecution('succeeded');
+  const reopened = new SqliteStore(f.dir);
+  cleanup.push(() => reopened.close());
+  const service = new DraftService(
+    reopened,
+    f.provider,
+    f.app.config.profile,
+    { log() {} },
+    120_000,
+    f.app.knowledge,
+  );
+  const result = await service.createFromIdea(
+    { ideaId: f.idea.id, idempotencyKey: 'historical' },
+    context,
+  );
+  expect(result).toEqual({ draft: historical, replayed: true });
+  expect(f.provider.generateDraft).not.toHaveBeenCalled();
+  expect(f.provider.assessDraft).not.toHaveBeenCalled();
+  const fresh = await invoke(f, 'editorial-new-key');
+  expect(fresh.draft.promptVersion).toBe('research-draft-v2-editorial');
+  expect(fresh.draft.body).not.toContain('Publisher report:');
+});
+
+it.each([
+  ['failed', 'PREVIOUS_FAILURE'],
+  ['running', 'IN_PROGRESS'],
+] as const)(
+  'preserves historical %s outcomes without retrying',
+  async (status, code) => {
+    const { f } = await historicalExecution(status);
+    await expect(invoke(f, 'historical')).rejects.toMatchObject({ code });
+    expect(f.provider.generateDraft).not.toHaveBeenCalled();
+    expect(f.provider.assessDraft).not.toHaveBeenCalled();
+  },
+);
+
+it('does not use historical replay to bypass changed inputs, private evidence, review or lineage', async () => {
+  const { f } = await historicalExecution('succeeded');
+  await expect(
+    f.app.tools.invoke(
+      'draft_from_idea',
+      { ideaId: f.idea.id, idempotencyKey: 'historical', tone: 'changed' },
+      context,
+    ),
+  ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  const withKnowledge = new DraftService(
+    f.app.store,
+    f.provider,
+    f.app.config.profile,
+    { log() {} },
+    120_000,
+    { retrieve: async () => structuredClone(diagnosticKnowledge) },
+  );
+  await expect(
+    withKnowledge.createFromIdea(
+      { ideaId: f.idea.id, idempotencyKey: 'historical' },
+      context,
+    ),
+  ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  f.db
+    .prepare('UPDATE research_draft_links SET evidence_hash = ?')
+    .run('incorrect');
+  await expect(invoke(f, 'historical')).rejects.toMatchObject({
+    code: 'IDEMPOTENCY_CONFLICT',
+  });
+  f.app.store.reviewIdea('local', f.idea.id, 'rejected');
+  await expect(invoke(f, 'historical')).rejects.toMatchObject({
+    code: 'IDEA_NOT_ACCEPTED',
+  });
+  expect(f.provider.generateDraft).not.toHaveBeenCalled();
+});
+
+it.each(['citations', 'units', 'approval'])(
+  'rejects generation-supplied authoritative %s before assessment',
+  async (field) => {
+    const f = await setup();
+    vi.mocked(f.provider.generateDraft).mockResolvedValue({
+      output: {
+        body: 'A bounded candidate.',
+        warnings: [],
+        [field]: [],
+      },
+      metadata,
+    });
+    await expect(invoke(f)).rejects.toMatchObject({
+      code: 'INVALID_OUTPUT',
+      reviewArtifactId: expect.any(String),
+    });
+    expect(f.provider.assessDraft).not.toHaveBeenCalled();
+    expect(f.app.store.listDrafts('local').total).toBe(0);
+  },
+);
+
+it('preserves application research warnings when the generator fills its warning budget', async () => {
+  const f = await setup();
+  vi.mocked(f.provider.generateDraft).mockResolvedValue({
+    output: {
+      body: 'What would you evaluate?',
+      warnings: Array.from(
+        { length: 10 },
+        (_, index) => `Model warning ${index}`,
+      ),
+    },
+    metadata,
+  });
+  const result = await invoke(f);
+  expect(result.draft.warnings.join(' ')).toContain(
+    'No live source revalidation',
+  );
+  expect(result.draft.warnings.join(' ')).toContain(
+    'accepted quotation may omit context',
+  );
+  expect(result.draft.warnings.join(' ')).toContain('Human review required');
 });

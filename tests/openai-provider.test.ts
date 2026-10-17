@@ -1,3 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DraftService } from '../src/application/drafting.js';
+import { SqliteStore } from '../src/infrastructure/sqlite.js';
+import { createLogger } from '../src/infrastructure/logger.js';
+import { AppError } from '../src/domain/errors.js';
+import { publicEvidenceProjection } from '../src/application/research-drafting.js';
 import { RESEARCH_SOURCES } from '../src/domain/research.js';
 import type { ResearchDraftContext } from '../src/domain/research-draft.js';
 import OpenAI from 'openai';
@@ -536,6 +544,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
         input: { brief: 'Synthetic idea' },
         profile,
         research: researchDraftFixture,
+        publicEvidence: publicEvidenceProjection(researchDraftFixture),
         commentaryLimit: 2000,
       },
       signal(),
@@ -547,8 +556,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
     expect(input[0]!.content).toContain('not draft approval');
     expect(input[0]!.content).not.toContain('UNTRUSTED_PUBLIC');
     expect(JSON.parse(input[1]!.content)).toMatchObject({
-      research: researchDraftFixture,
-      commentaryLimit: 2000,
+      publicEvidence: publicEvidenceProjection(researchDraftFixture),
     });
   });
   it('assesses only commentary with public context ineligible as private evidence', async () => {
@@ -556,7 +564,14 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
       textDraft(
         JSON.stringify({
           units: [
-            { id: 'u0', category: 'advice_opinion_question', evidence: null },
+            {
+              id: 'u0',
+              category: 'opinion_advice_question',
+              evidenceKind: 'none',
+              privateSourceIndex: null,
+              support: 'not_applicable',
+              reason: null,
+            },
           ],
         }),
       ),
@@ -565,10 +580,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
       {
         units: [{ id: 'u0', text: 'What would you evaluate?' }],
         sources: [],
-        publicContext: {
-          quote: researchDraftFixture.quote,
-          verification: 'publisher_reported',
-        },
+        publicEvidence: publicEvidenceProjection(researchDraftFixture),
       },
       signal(),
     );
@@ -577,7 +589,9 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
       store: false,
     });
     const input = f.requests[0]!.input as { content: string }[];
-    expect(input[0]!.content).toContain('never eligible evidence');
+    expect(input[0]!.content).toContain(
+      'Public-to-personal ownership transfers are unsupported',
+    );
     expect(JSON.parse(input[1]!.content).sources).toEqual([]);
   });
   it('never retries either research drafting operation', async () => {
@@ -588,6 +602,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
           input: { brief: 'Synthetic' },
           profile,
           research: researchDraftFixture,
+          publicEvidence: publicEvidenceProjection(researchDraftFixture),
         },
         signal(),
       ),
@@ -598,10 +613,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
         {
           units: [],
           sources: [],
-          publicContext: {
-            quote: researchDraftFixture.quote,
-            verification: 'publisher_reported',
-          },
+          publicEvidence: publicEvidenceProjection(researchDraftFixture),
         },
         signal(),
       ),
@@ -616,6 +628,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
           input: { brief: 'x'.repeat(40_000) },
           profile,
           research: researchDraftFixture,
+          publicEvidence: publicEvidenceProjection(researchDraftFixture),
         },
         signal(),
       ),
@@ -625,10 +638,7 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
         {
           units: [{ id: 'u0', text: 'x'.repeat(40_000) }],
           sources: [],
-          publicContext: {
-            quote: researchDraftFixture.quote,
-            verification: 'publisher_reported',
-          },
+          publicEvidence: publicEvidenceProjection(researchDraftFixture),
         },
         signal(),
       ),
@@ -636,3 +646,118 @@ describe('research drafting through real SDK with local HTTP fixtures', () => {
     expect(f.requests).toHaveLength(0);
   });
 });
+
+it('recovers only a bounded body when the real SDK receives an unexpected approval field', async () => {
+  const body = 'PRIVATE_CANDIDATE for human review.';
+  const { provider, requests } = fixture([
+    textDraft(
+      JSON.stringify({ body, warnings: [], approved: 'PRIVATE_EXTRA' }),
+    ),
+  ]);
+  const result = await provider.generateDraft(
+    { input: { brief: 'Draft' }, profile },
+    signal(),
+  );
+  expect(result.output).toEqual({ body });
+  expect(requests).toHaveLength(1);
+});
+
+it.each([
+  { warnings: [], approved: 'PRIVATE_EXTRA' },
+  { warnings: 'PRIVATE_EXTRA' },
+  { warnings: ['PRIVATE_EXTRA'], claims: [{ quote: 'PRIVATE_EXTRA' }] },
+  { warnings: Array(11).fill('PRIVATE_EXTRA') },
+  {},
+])(
+  'persists only the recovered SDK candidate as a failed private artifact: %j',
+  async (extra) => {
+    const body = 'PRIVATE_CANDIDATE for human review.';
+    const { provider, requests } = fixture([
+      textDraft(JSON.stringify({ body, ...extra })),
+    ]);
+    const dir = mkdtempSync(join(tmpdir(), 'linkedout-sdk-recovery-'));
+    let store = new SqliteStore(dir);
+    const logs: string[] = [];
+    const context = {
+      actor: 'test' as const,
+      permissions: new Set(['draft_local', 'read_local'] as const),
+    };
+    const input = { brief: 'Synthetic review', idempotencyKey: 'recovery-key' };
+    try {
+      const service = new DraftService(
+        store,
+        provider,
+        profile,
+        createLogger((line) => logs.push(line)),
+      );
+      const error = await service
+        .create(input, context)
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(AppError);
+      expect(error).toMatchObject({
+        code: 'INVALID_OUTPUT',
+        reviewArtifactId: expect.any(String),
+      });
+      const id = (error as AppError).reviewArtifactId!;
+      const artifact = store.getReviewArtifact(profile.id, id);
+      expect(artifact).toMatchObject({
+        body,
+        status: 'blocked',
+        publishable: false,
+        reviewRequired: true,
+        failureCode: 'INVALID_OUTPUT',
+      });
+      expect(artifact.assessment).toBeUndefined();
+      expect(JSON.stringify(artifact)).not.toContain('PRIVATE_EXTRA');
+      expect(store.listDrafts(profile.id).total).toBe(0);
+      expect(store.getRun(profile.id, artifact.runId)).toMatchObject({
+        status: 'failed',
+        reviewArtifactId: id,
+        draftId: null,
+      });
+      expect(logs.join('') + JSON.stringify(error)).not.toContain('PRIVATE_');
+      store.close();
+      store = new SqliteStore(dir);
+      expect(store.getReviewArtifact(profile.id, id)).toEqual(artifact);
+      await expect(
+        new DraftService(
+          store,
+          provider,
+          profile,
+          createLogger((line) => logs.push(line)),
+        ).create(input, context),
+      ).rejects.toMatchObject({ code: 'PREVIOUS_FAILURE' });
+      expect(requests).toHaveLength(1);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each([
+  [textDraft(), textDraft()],
+  [
+    message([
+      { type: 'output_text', text: '{}', annotations: [] },
+      { type: 'output_text', text: '{}', annotations: [] },
+    ]),
+  ],
+  [{ ...textDraft(), status: 'incomplete' }],
+  [textDraft(), functionCall()],
+  [textDraft(), message([{ type: 'refusal', refusal: 'PRIVATE_REFUSAL' }])],
+  [textDraft('null')],
+  [textDraft('[]')],
+  [textDraft('{"body":"PRIVATE_CANDIDATE",')],
+])(
+  'does not recover ambiguous, refused or unparseable output %#',
+  async (...output) => {
+    const { provider, requests } = fixture(output);
+    const error = await provider
+      .generateDraft({ input: { brief: 'Draft' }, profile }, signal())
+      .catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(AppError);
+    expect(JSON.stringify(error)).not.toContain('PRIVATE_');
+    expect(requests).toHaveLength(1);
+  },
+);

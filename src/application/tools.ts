@@ -198,7 +198,7 @@ export function createTools(
     {
       name: 'draft_from_idea',
       description:
-        'Generate a human-review-required draft from an accepted idea and its stored research attachment. Acceptance authorizes generation only, never approval, publishing or messaging. Two bounded model operations; no public refresh.',
+        'Generate a human-review-required draft from an accepted idea and its frozen public evidence and structured citations. Acceptance authorizes generation only, never approval, publishing or messaging. Two bounded model operations; no public refresh.',
       permission: 'draft_local',
       inputSchema: ideaDraftInputSchema,
       readOnly: false,

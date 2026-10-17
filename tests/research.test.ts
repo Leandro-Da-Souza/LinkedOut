@@ -453,7 +453,7 @@ describe('research persistence and bounded planning', () => {
 });
 
 describe('GitHub HTTP boundary with local fetch fixtures', () => {
-  it('uses only fixed endpoints, disables redirects, strips active text and enforces excerpt limits', async () => {
+  it('uses only fixed endpoints, disables redirects, preserves inert markup and enforces excerpt limits', async () => {
     const fetcher = fetchFixture({
       body: '<script>untrusted</script>\u001b[31m' + 'x'.repeat(4000),
     });
@@ -465,7 +465,7 @@ describe('GitHub HTTP boundary with local fetch fixtures', () => {
       expect(String(url)).toMatch(/^https:\/\/api.github.com\/repos\//);
       expect(options?.redirect).toBe('error');
     }
-    expect(result.items[0]!.excerpt).not.toContain('<script>');
+    expect(result.items[0]!.excerpt).toContain('<script>untrusted</script>');
     expect(result.items[0]!.excerpt).not.toContain(String.fromCharCode(27));
     expect(result.items[0]).toMatchObject({
       truncated: true,
@@ -687,3 +687,22 @@ it('shares research and review behavior between CLI and the official MCP client 
     output.destroy();
   }
 });
+
+it.each([
+  'Versions <2 are unsupported; versions >4 are recommended.',
+  'Use `Map<Key, Value>` only when x < y && y > z.',
+  'Not supported: <experimental>. Requires ≥4; avoid ≤2.',
+  '<del>Supported</del> is a retracted claim; <em>not</em> supported.',
+])(
+  'preserves release evidence and deterministic identity: %s',
+  async (body) => {
+    const feed = new GithubResearchFeed(fetchFixture({ body }), now);
+    const first = (await feed.collect(new AbortController().signal)).items[0]!;
+    const second = (await feed.collect(new AbortController().signal)).items[0]!;
+    expect(first.excerpt).toBe(body);
+    expect(second.contentHash).toBe(first.contentHash);
+    expect(second.identity).toBe(first.identity);
+    expect(second.source).toEqual(first.source);
+    expect(second.url).toBe(first.url);
+  },
+);

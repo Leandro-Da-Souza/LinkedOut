@@ -311,7 +311,7 @@ describe('whole-unit assessment regressions', () => {
       })),
     );
     expect(result.report.issues).toEqual(['UNSUPPORTED_FACT']);
-    const many = 'A factual assertion.'.repeat(21);
+    const many = 'A factual assertion. '.repeat(21);
     expect(
       assess(
         many,
@@ -322,7 +322,7 @@ describe('whole-unit assessment regressions', () => {
         })),
       ).report.diagnostics,
     ).toEqual([{ reason: 'FINDING_LIMIT' }]);
-    const excessive = 'Advice.'.repeat(201);
+    const excessive = 'Advice. '.repeat(201);
     expect(
       assess(
         excessive,
@@ -335,4 +335,119 @@ describe('whole-unit assessment regressions', () => {
       diagnostics: [{ reason: 'INVALID_SCHEMA' }, { reason: 'UNIT_LIMIT' }],
     });
   });
+});
+
+import {
+  misleadingExcerpts,
+  personalClaim,
+} from './fixtures/private-evidence.js';
+
+it.each(misleadingExcerpts)(
+  'rejects private context removal from %s',
+  (excerpt) => {
+    const knowledge = {
+      ...diagnosticKnowledge,
+      sources: [{ ...diagnosticKnowledge.sources[0]!, excerpt }],
+    };
+    const result = assessBody(
+      { body: personalClaim, warnings: [] },
+      knowledge,
+      profile,
+      {
+        units: [
+          {
+            id: 'u0',
+            category: 'personal_fact',
+            evidence: { sourceId, quote: personalClaim },
+          },
+        ],
+      },
+    );
+    expect(result.report.blocked).toBe(true);
+    expect(result.report.findings[0]?.status).toBe('invalid_reference');
+    expect(result.claims).toEqual([]);
+  },
+);
+
+it.each(['Alex said:\n', 'It is false that\n', 'A.'])(
+  'ordinary assessment retains body context at %s',
+  (prefix) => {
+    const body = prefix + personalClaim;
+    const knowledge = {
+      ...diagnosticKnowledge,
+      sources: [{ ...diagnosticKnowledge.sources[0]!, excerpt: personalClaim }],
+    };
+    const result = assessBody({ body, warnings: [] }, knowledge, profile, {
+      units: bodyUnits(body).map((unit) => ({
+        id: unit.id,
+        category: 'personal_fact',
+        evidence: { sourceId, quote: personalClaim },
+      })),
+    });
+    expect(result.report.blocked).toBe(true);
+    expect(result.claims).toEqual([]);
+  },
+);
+
+it.each([
+  'I reduced latency by 12.5 percent.',
+  'I upgraded the service to v1.2.3.',
+  'I used e.g. synthetic examples.',
+  'I documented https://example.test/v1.2/guide.',
+  'Eu reduzi a latência em 12.5 percent 🙂.',
+])('preserves technical sentences and their exact evidence: %s', (body) => {
+  expect(bodyUnits(body)).toEqual([
+    { id: 'u0', start: 0, end: body.length, text: body },
+  ]);
+  const knowledge = {
+    ...diagnosticKnowledge,
+    sources: [{ ...diagnosticKnowledge.sources[0]!, excerpt: body }],
+  };
+  const result = assessBody({ body, warnings: [] }, knowledge, profile, {
+    units: [
+      {
+        id: 'u0',
+        category: 'personal_fact',
+        evidence: { sourceId, quote: body },
+      },
+    ],
+  });
+  expect(result.report.blocked).toBe(false);
+  expect(result.report.findings[0]?.status).toBe('exact_match');
+  expect(result.claims).toEqual([{ text: body, sourceId, quote: body }]);
+  const unsupported = assessBody({ body, warnings: [] }, knowledge, profile, {
+    units: [{ id: 'u0', category: 'personal_fact', evidence: null }],
+  });
+  expect(unsupported.report.blocked).toBe(true);
+  expect(unsupported.claims).toEqual([]);
+});
+
+it('binds repeated decimal claims to distinct UTF-16 spans without hiding changed quantities', () => {
+  const sentence = 'I reduced latency by 12.5 percent.';
+  const body = `🙂 Consider measuring. ${sentence} ${sentence} I reduced latency by 99.5 percent.`;
+  const knowledge = {
+    ...diagnosticKnowledge,
+    sources: [{ ...diagnosticKnowledge.sources[0]!, excerpt: sentence }],
+  };
+  const units = bodyUnits(body);
+  expect(units).toHaveLength(4);
+  for (const unit of units)
+    expect(body.slice(unit.start, unit.end)).toBe(unit.text);
+  const result = assessBody({ body, warnings: [] }, knowledge, profile, {
+    units: units.map((unit, index) => ({
+      id: unit.id,
+      category: index === 0 ? 'advice_opinion_question' : 'personal_fact',
+      evidence: index === 0 ? null : { sourceId, quote: sentence },
+    })),
+  });
+  expect(result.report.findings.map((finding) => finding.status)).toEqual([
+    'exact_match',
+    'exact_match',
+    'plausible_paraphrase',
+  ]);
+  expect(result.report.blocked).toBe(true);
+  expect(result.claims).toHaveLength(2);
+  expect(result.report.findings[0]!.start).not.toBe(
+    result.report.findings[1]!.start,
+  );
 });

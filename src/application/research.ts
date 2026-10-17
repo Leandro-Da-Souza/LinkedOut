@@ -133,7 +133,10 @@ export class ResearchWorkflow {
     try {
       const now = this.now();
       const lookbackDays = input.lookbackDays ?? this.defaultLookback;
-      const collected = await this.feed.collect(signal);
+      const collected = await this.feed.collect(
+        signal,
+        this.store.researchCacheFor(this.profile.id, runId),
+      );
       checkAbort(signal);
       const items = this.store.saveResearchItems(
         this.profile.id,
@@ -143,6 +146,7 @@ export class ResearchWorkflow {
       this.store.pruneResearch(
         this.profile.id,
         new Date(now.getTime() - 90 * 86_400_000).toISOString(),
+        runId,
       );
       this.store.recordPlan(runId, {
         outcomes: collected.outcomes,

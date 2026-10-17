@@ -19,12 +19,10 @@ const releaseSchema = z.object({
   draft: z.boolean(),
   prerelease: z.boolean(),
 });
-// Stored text is plain data. Remove HTML and terminal controls, never render or follow it.
+// Stored Markdown (including HTML) is inert evidence, never rendered or followed.
+// Preserve comparisons, code, and qualifications; only remove terminal controls.
 export const plainResearchText = (value: string): string =>
-  value
-    .replace(/<[^>]*>/g, '')
-    .replace(/\p{Cc}/gu, ' ')
-    .trim();
+  value.replace(/\p{Cc}/gu, ' ').trim();
 
 export class GithubResearchFeed implements ResearchFeed {
   constructor(
@@ -32,12 +30,13 @@ export class GithubResearchFeed implements ResearchFeed {
     private readonly now = () => new Date(),
     private readonly cache?: ResearchCache,
   ) {}
-  async collect(signal: AbortSignal) {
+  async collect(signal: AbortSignal, executionCache?: ResearchCache) {
+    const cache = executionCache ?? this.cache;
     const items: ResearchItem[] = [];
     const outcomes: SourceOutcome[] = [];
     let requests = 0;
     let bytes = 0;
-    const cooldown = this.cache?.getResearchCache('github-cooldown');
+    const cooldown = cache?.getResearchCache('github-cooldown');
     if (typeof cooldown === 'number' && cooldown > this.now().getTime())
       return {
         items,
@@ -54,7 +53,7 @@ export class GithubResearchFeed implements ResearchFeed {
       checkAbort(signal);
       let truncated = false;
       try {
-        const cached = this.cache?.getResearchCache(source.repository) as
+        const cached = cache?.getResearchCache(source.repository) as
           | {
               etag?: string;
               items: ResearchItem[];
@@ -91,7 +90,7 @@ export class GithubResearchFeed implements ResearchFeed {
             retrievedAt: this.now().toISOString(),
           }));
           items.push(...refreshed);
-          this.cache?.setResearchCache(source.repository, {
+          cache?.setResearchCache(source.repository, {
             ...freshCache,
             items: refreshed,
             savedAt: this.now().getTime(),
@@ -127,7 +126,7 @@ export class GithubResearchFeed implements ResearchFeed {
                   : NaN;
             const resetMs =
               Number(response.headers.get('x-ratelimit-reset')) * 1000;
-            this.cache?.setResearchCache(
+            cache?.setResearchCache(
               'github-cooldown',
               Math.max(
                 this.now().getTime() + 60_000,
@@ -269,7 +268,7 @@ export class GithubResearchFeed implements ResearchFeed {
           count++;
         }
         if (!invalid)
-          this.cache?.setResearchCache(source.repository, {
+          cache?.setResearchCache(source.repository, {
             etag: response.headers.get('etag') ?? undefined,
             items: items.slice(start),
             savedAt: this.now().getTime(),

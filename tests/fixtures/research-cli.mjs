@@ -43,8 +43,11 @@ const app = createApplication(undefined, {
         output: {
           units: request.units.map((unit) => ({
             id: unit.id,
-            category: 'advice_opinion_question',
-            evidence: null,
+            category: 'opinion_advice_question',
+            evidenceKind: 'none',
+            privateSourceIndex: null,
+            support: 'not_applicable',
+            reason: null,
           })),
         },
         metadata: { provider: 'fixture', model: 'fixture' },

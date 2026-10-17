@@ -3,7 +3,8 @@ import { AppError } from '../domain/errors.js';
 import { RESEARCH_SOURCES } from '../domain/research.js';
 import type { ResearchItem } from '../domain/research.js';
 import type {
-  PublicCitation,
+  ResearchAttachmentCitation,
+  PublicEvidenceProjection,
   ResearchDraftContext,
 } from '../domain/research-draft.js';
 import type { SqliteStore } from '../infrastructure/sqlite.js';
@@ -175,7 +176,7 @@ export function resolveResearchDraft(
   const warnings = [
     'Idea acceptance authorizes generation only. This draft is not approved; human review is required before any use.',
     'Public research is publisher-reported, not independently verified. No live source revalidation was performed.',
-    'The public evidence block is an attributed research attachment, not a final editorial format.',
+    'Public claim citations refer to frozen publisher evidence in metadata, not independently verified facts.',
     'The accepted quotation may omit context or end mid-sentence; inspect the original source.',
   ];
   if (
@@ -194,7 +195,7 @@ export function resolveResearchDraft(
 
 export function researchAttachment(research: ResearchDraftContext): {
   prefix: string;
-  citation: PublicCitation;
+  citation: ResearchAttachmentCitation;
 } {
   const header = `Publisher report: ${research.item.repository} — ${research.item.publishedAt}\n“`;
   const block = `${header}${research.quote}”\nSource: ${research.item.url}`;
@@ -215,5 +216,19 @@ export function researchAttachment(research: ResearchDraftContext): {
       quoteStart: header.length,
       quoteEnd: header.length + research.quote.length,
     },
+  };
+}
+
+export function publicEvidenceProjection(
+  research: ResearchDraftContext,
+): PublicEvidenceProjection {
+  const { repository, title, tag, publishedAt, excerpt } = research.item;
+  return {
+    repository,
+    title,
+    tag,
+    publishedAt: publishedAt!,
+    excerpt,
+    verification: 'publisher_reported',
   };
 }

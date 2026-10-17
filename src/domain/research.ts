@@ -98,7 +98,10 @@ export interface SourceOutcome {
   count: number;
 }
 export interface ResearchFeed {
-  collect(signal: AbortSignal): Promise<{
+  collect(
+    signal: AbortSignal,
+    executionCache?: ResearchCache,
+  ): Promise<{
     items: ResearchItem[];
     outcomes: SourceOutcome[];
     requests: number;

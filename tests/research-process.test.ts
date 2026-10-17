@@ -90,7 +90,8 @@ it('persists research through actual CLI processes and replays with no configure
       ['ideas', 'draft', id, '--idempotency-key', 'draft-process'],
       true,
     );
-    expect(draft.draft.publicCitations[0].kind).toBe('research_attachment');
+    expect(draft.draft.publicCitations).toEqual([]);
+    expect(draft.draft.body).not.toContain('Publisher report:');
     expect(draft.draft.review.required).toBe(true);
     expect(
       invoke(
