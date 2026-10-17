@@ -26,6 +26,34 @@ const app = createApplication(undefined, {
       },
     ]);
   }),
+  provider: {
+    provider: 'fixture',
+    model: 'fixture',
+    async generateDraft() {
+      return {
+        output: {
+          body: 'What would you evaluate before adoption?',
+          warnings: [],
+        },
+        metadata: { provider: 'fixture', model: 'fixture' },
+      };
+    },
+    async assessDraft(request) {
+      return {
+        output: {
+          units: request.units.map((unit) => ({
+            id: unit.id,
+            category: 'advice_opinion_question',
+            evidence: null,
+          })),
+        },
+        metadata: { provider: 'fixture', model: 'fixture' },
+      };
+    },
+    async proposeTools() {
+      throw new Error('No planner expected');
+    },
+  },
   researchPlanner: {
     provider: 'fixture',
     model: 'fixture',

@@ -1,4 +1,14 @@
 import {
+  ideaDraftInputSchema,
+  RESEARCH_DRAFT_VERSION,
+} from '../domain/research-draft.js';
+import type { ResearchDraftContext } from '../domain/research-draft.js';
+import {
+  resolveResearchDraft,
+  researchAttachment,
+  assertDraftPolicy,
+} from './research-drafting.js';
+import {
   ASSESSMENT_VERSION,
   GROUNDING_POLICY_VERSION,
   type AssessmentReport,
@@ -38,6 +48,43 @@ export class DraftService {
     private readonly knowledge?: KnowledgeReader,
   ) {}
   async create(raw: unknown, context: ExecutionContext): Promise<DraftResult> {
+    return this.createPrepared(raw, context);
+  }
+  async createFromIdea(
+    raw: unknown,
+    context: ExecutionContext,
+  ): Promise<DraftResult> {
+    if (!context.permissions.has('draft_local'))
+      throw new AppError(
+        'PERMISSION_DENIED',
+        'Local drafting permission is required.',
+      );
+    checkAbort(context.signal);
+    const input = parseInput(ideaDraftInputSchema, raw);
+    const signal = context.signal
+      ? AbortSignal.any([context.signal, AbortSignal.timeout(this.timeoutMs)])
+      : AbortSignal.timeout(this.timeoutMs);
+    const resolved = resolveResearchDraft(
+      this.store,
+      this.profile.id,
+      input.ideaId,
+    );
+    const { ideaId, ...preferences } = input;
+    void ideaId;
+    return this.createPrepared(
+      {
+        ...preferences,
+        brief: `${resolved.idea.title}\n${resolved.idea.angle}`,
+      },
+      { ...context, signal },
+      resolved,
+    );
+  }
+  private async createPrepared(
+    raw: unknown,
+    context: ExecutionContext,
+    resolved?: ReturnType<typeof resolveResearchDraft>,
+  ): Promise<DraftResult> {
     if (!context.permissions.has('draft_local'))
       throw new AppError(
         'PERMISSION_DENIED',
@@ -49,12 +96,48 @@ export class DraftService {
     const signal = context.signal
       ? AbortSignal.any([deadline, context.signal])
       : deadline;
+    const research: ResearchDraftContext | undefined = resolved?.research;
+    const attachment = research ? researchAttachment(research) : undefined;
+    const promptVersion = research ? RESEARCH_DRAFT_VERSION : PROMPT_VERSION;
+    const tool = research ? 'draft_from_idea' : 'draft_post';
     const knowledge = structuredClone(
-      context.knowledge ??
-        (await this.knowledge?.retrieve(input.brief, signal)) ??
+      (research ? undefined : context.knowledge) ??
+        (await this.knowledge?.retrieve(
+          resolved?.query ?? input.brief,
+          signal,
+        )) ??
         EMPTY_KNOWLEDGE,
     );
     checkAbort(signal);
+    if (
+      research &&
+      (knowledge.sources.length > 6 ||
+        knowledge.sources.reduce(
+          (sum, source) => sum + source.excerpt.length,
+          0,
+        ) > 6000)
+    )
+      throw new AppError(
+        'WORKFLOW_LIMIT',
+        'Private evidence exceeds the drafting budget.',
+      );
+    if (attachment && attachment.prefix.length >= 3000)
+      throw new AppError(
+        'WORKFLOW_LIMIT',
+        'The attributed research attachment exceeds the draft budget.',
+      );
+    const warnings = [...(resolved?.warnings ?? [])];
+    if (
+      resolved?.idea.personalEvidence &&
+      !knowledge.sources.some(
+        (source) =>
+          source.id === resolved.idea.personalEvidence!.sourceId &&
+          source.excerpt.includes(resolved.idea.personalEvidence!.quote),
+      )
+    )
+      warnings.push(
+        'The historical private quotation was not supplied by current retrieval and cannot support this draft.',
+      );
     const request: GenerationRequest = {
       input: {
         brief: input.brief,
@@ -65,6 +148,9 @@ export class DraftService {
       },
       profile: this.profile,
       knowledge,
+      ...(research && attachment
+        ? { research, commentaryLimit: 3000 - attachment.prefix.length }
+        : {}),
     };
     // Fixed construction order makes normalized effective inputs deterministic.
     const hash = createHash('sha256')
@@ -73,7 +159,9 @@ export class DraftService {
           request,
           provider: this.provider.provider,
           model: this.provider.model,
-          promptVersion: PIPELINE_VERSION,
+          promptVersion: research
+            ? `${RESEARCH_DRAFT_VERSION}:${PIPELINE_VERSION}`
+            : PIPELINE_VERSION,
         }),
       )
       .digest('hex');
@@ -83,6 +171,7 @@ export class DraftService {
       request,
       input.idempotencyKey,
       context,
+      research,
     );
     if (reservation.draft) return { draft: reservation.draft, replayed: true };
     const runId = reservation.runId;
@@ -90,14 +179,17 @@ export class DraftService {
       event: 'run_started',
       runId,
       actor: context.actor,
-      tool: 'draft_post',
+      tool,
     });
     let candidate: GeneratedBody | undefined;
     let generation: ModelMetadata | undefined;
     let assessment: AssessmentReport | undefined;
     const knowledgeHash = digest(knowledge);
     const provenance = structuredClone({
-      origin: 'user_provided' as const,
+      origin: research
+        ? ('accepted_content_idea' as const)
+        : ('user_provided' as const),
+      ...(research ? { research } : {}),
       profile: this.profile,
       input: request.input,
       knowledge,
@@ -117,7 +209,10 @@ export class DraftService {
             : undefined;
         const retainedBody = generatedBodySchema.shape.body.safeParse(rawBody);
         if (retainedBody.success) {
-          candidate = { body: retainedBody.data, warnings: [] };
+          candidate = {
+            body: `${attachment?.prefix ?? ''}${retainedBody.data}`,
+            warnings,
+          };
           generation = generated.metadata;
         }
         throw new AppError(
@@ -125,16 +220,33 @@ export class DraftService {
           'The provider returned an invalid draft. Nothing was stored as a draft.',
         );
       }
-      candidate = validated.data;
+      const commentary = validated.data;
+      candidate = {
+        body: `${attachment?.prefix ?? ''}${commentary.body}`,
+        warnings: [...commentary.warnings, ...warnings],
+      };
       generation = generated.metadata;
+      if (candidate.body.length > 3000)
+        throw new AppError(
+          'INVALID_OUTPUT',
+          'The assembled draft exceeds 3000 characters. Inspect its private artifact.',
+        );
       checkAbort(signal);
       const bodyHash = digest(candidate.body);
       const assessed = await this.provider.assessDraft(
         {
-          units: bodyUnits(candidate.body).map(({ id, text }) => ({
+          units: bodyUnits(commentary.body).map(({ id, text }) => ({
             id,
             text,
           })),
+          ...(research
+            ? {
+                publicContext: {
+                  quote: research.quote,
+                  verification: 'publisher_reported' as const,
+                },
+              }
+            : {}),
           sources: knowledge.sources.map(({ id, excerpt }) => ({
             id,
             excerpt,
@@ -143,12 +255,23 @@ export class DraftService {
         signal,
       );
       const result = assessBody(
-        candidate,
+        commentary,
         knowledge,
         this.profile,
         assessed.output,
+        Boolean(research),
       );
       assessment = { ...result.report, metadata: assessed.metadata };
+      if (research && attachment) {
+        assessment.bodyHash = digest(candidate.body);
+        assessment.publicEvidenceHash = research.evidenceHash;
+        assessment.researchPolicyVersion = RESEARCH_DRAFT_VERSION;
+        assessment.publicCitations = [attachment.citation];
+        for (const span of [...assessment.units, ...assessment.findings]) {
+          span.start += attachment.prefix.length;
+          span.end += attachment.prefix.length;
+        }
+      }
       checkAbort(signal);
       if (
         bodyHash !== digest(candidate.body) ||
@@ -164,29 +287,48 @@ export class DraftService {
           assessment.heuristicDiagnostic,
         );
       const grounded = groundDraft(
-        { ...candidate, claims: result.claims },
+        { ...commentary, warnings: candidate.warnings, claims: result.claims },
         knowledge,
         this.profile,
       );
       const draft = {
         ...grounded.output,
+        body: candidate.body,
+        ...(attachment ? { publicCitations: [attachment.citation] } : {}),
         review: grounded.review,
         id: randomUUID(),
         userId: this.profile.id,
         runId,
         createdAt: new Date().toISOString(),
         status: 'draft' as const,
-        promptVersion: PROMPT_VERSION,
+        promptVersion,
         provenance,
         assessment,
         generation: generated.metadata,
       };
-      this.store.completeDraft(draft);
+      this.store.completeDraft(
+        draft,
+        research
+          ? () => {
+              assertDraftPolicy(research);
+              const current = resolveResearchDraft(
+                this.store,
+                this.profile.id,
+                research.ideaId,
+              );
+              if (current.research.evidenceHash !== research.evidenceHash)
+                throw new AppError(
+                  'RESEARCH_EVIDENCE_INVALID',
+                  'Research evidence changed during drafting.',
+                );
+            }
+          : undefined,
+      );
       this.logger.log({
         event: 'run_succeeded',
         runId,
         actor: context.actor,
-        tool: 'draft_post',
+        tool,
       });
       return { draft, replayed: false };
     } catch (error) {
@@ -204,6 +346,12 @@ export class DraftService {
         if (candidate && generation) {
           const artifact: ReviewArtifact = {
             ...candidate,
+            ...(attachment && research
+              ? {
+                  publicCitations: [attachment.citation],
+                  publicEvidenceHash: research.evidenceHash,
+                }
+              : {}),
             warnings: groundDraft(
               { body: '', warnings: candidate.warnings, claims: [] },
               knowledge,
@@ -220,7 +368,7 @@ export class DraftService {
             reviewRequired: true,
             bodyHash: digest(candidate.body),
             knowledgeHash,
-            promptVersion: PROMPT_VERSION,
+            promptVersion,
             provenance,
             generation,
             ...(assessment ? { assessment } : {}),
@@ -241,7 +389,7 @@ export class DraftService {
         event: 'run_failed',
         runId,
         actor: context.actor,
-        tool: 'draft_post',
+        tool,
         code: safe.code,
       });
       throw safe;

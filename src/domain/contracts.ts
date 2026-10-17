@@ -78,6 +78,8 @@ export interface GenerationRequest {
   input: Omit<DraftInput, 'idempotencyKey'>;
   profile: UserProfile;
   knowledge?: KnowledgeContext;
+  research?: import('./research-draft.js').ResearchDraftContext;
+  commentaryLimit?: number;
 }
 export interface ModelMetadata {
   provider: string;
@@ -86,6 +88,7 @@ export interface ModelMetadata {
   usage?: { inputTokens: number; outputTokens: number };
 }
 export interface Draft extends GeneratedDraft {
+  publicCitations?: import('./research-draft.js').PublicCitation[];
   id: string;
   userId: string;
   runId: string;
@@ -93,7 +96,8 @@ export interface Draft extends GeneratedDraft {
   status: 'draft';
   promptVersion: string;
   provenance: {
-    origin: 'user_provided';
+    origin: 'user_provided' | 'accepted_content_idea';
+    research?: import('./research-draft.js').ResearchDraftContext;
     profile: UserProfile;
     input: GenerationRequest['input'];
     knowledge?: KnowledgeContext;

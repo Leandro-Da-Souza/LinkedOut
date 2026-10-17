@@ -28,6 +28,32 @@ export async function runCli(
     ...(signal ? { signal } : {}),
   };
   if (group === 'research' || group === 'ideas') {
+    if (group === 'ideas' && action === 'draft') {
+      const { values, positionals } = readArgs(rest, {
+        'idempotency-key': { type: 'string' },
+        audience: { type: 'string' },
+        tone: { type: 'string' },
+        language: { type: 'string' },
+      });
+      if (positionals.length !== 1) throw usage();
+      return app.tools.invoke(
+        'draft_from_idea',
+        {
+          ideaId: positionals[0],
+          ...(values['idempotency-key'] !== undefined
+            ? { idempotencyKey: values['idempotency-key'] }
+            : {}),
+          ...(values['audience'] !== undefined
+            ? { audience: values['audience'] }
+            : {}),
+          ...(values['tone'] !== undefined ? { tone: values['tone'] } : {}),
+          ...(values['language'] !== undefined
+            ? { language: values['language'] }
+            : {}),
+        },
+        context,
+      );
+    }
     if (group === 'research' && action === 'run') {
       const { values, positionals } = readArgs(rest, {
         'lookback-days': { type: 'string' },
@@ -220,7 +246,7 @@ function integerFlag(value: string): number {
 function usage(): AppError {
   return new AppError(
     'INVALID_INPUT',
-    'Usage: research run [--lookback-days 7..90 --idempotency-key KEY]|sources|items|get UUID|delete-run UUID; ideas list|get UUID|review UUID --status proposed|accepted|rejected; artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
+    'Usage: research run [--lookback-days 7..90 --idempotency-key KEY]|sources|items|get UUID|delete-run UUID; ideas list|get UUID|review UUID --status proposed|accepted|rejected|draft UUID [--idempotency-key KEY --audience TEXT --tone TEXT --language TEXT]; artifacts list|get UUID|delete UUID; agent run --brief TEXT; drafts create --brief TEXT; drafts|runs list [--limit N --offset N]; drafts|runs get UUID; knowledge index; knowledge search --query TEXT.',
   );
 }
 

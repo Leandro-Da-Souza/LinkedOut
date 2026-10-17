@@ -85,6 +85,25 @@ it('persists research through actual CLI processes and replays with no configure
     );
     expect(invoke(['runs', 'get', run.result.runId]).run.kind).toBe('research');
     expect(invoke(['research', 'sources']).sources).toHaveLength(6);
+    invoke(['ideas', 'review', id, '--status', 'accepted']);
+    const draft = invoke(
+      ['ideas', 'draft', id, '--idempotency-key', 'draft-process'],
+      true,
+    );
+    expect(draft.draft.publicCitations[0].kind).toBe('research_attachment');
+    expect(draft.draft.review.required).toBe(true);
+    expect(
+      invoke(
+        ['ideas', 'draft', id, '--idempotency-key', 'draft-process'],
+        true,
+      ),
+    ).toMatchObject({ replayed: true, draft: { id: draft.draft.id } });
+    expect(invoke(['drafts', 'get', draft.draft.id]).draft).toEqual(
+      draft.draft,
+    );
+    expect(
+      invoke(['runs', 'get', draft.draft.runId]).run.researchOrigin.ideaId,
+    ).toBe(id);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

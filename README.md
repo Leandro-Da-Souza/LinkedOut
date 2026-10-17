@@ -136,3 +136,7 @@ npm run ideas -- list
 ```
 
 New eligible research can incur one bounded model call. Reusing a completed key returns immutable historical results without fetching or generating again. Use a new key or no key for fresh research. No scheduling or LinkedIn actions are implemented.
+
+## Draft from an accepted research idea
+
+Use `npm run ideas -- draft IDEA_UUID --idempotency-key KEY` after inspecting and accepting the idea. This can incur two model calls. Idea acceptance authorizes generation only, never draft approval or publication. Public evidence is retained as an attributed research attachment and separate `publicCitations`; private knowledge remains separate. See [Milestone 2.5](docs/milestone-2.5.md) for the live experiment commands, snapshot/replay semantics, blocked artifacts, and deletion retention.

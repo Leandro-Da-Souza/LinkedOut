@@ -203,7 +203,7 @@ describe('shared drafting services with real SQLite', () => {
     expect(reopened.getReviewArtifact('local', artifact.id)).toEqual(artifact);
   });
 
-  it.each([1, 2, 3])(
+  it.each([1, 2, 3, 4])(
     'migrates version %s history without inventing assessments or changing saved drafts',
     async (version) => {
       const f = fixture();
@@ -230,7 +230,11 @@ describe('shared drafting services with real SQLite', () => {
         JSON.stringify(legacy),
         legacy.id,
       );
-      db.exec(`DROP TABLE idea_reviews;
+      db.exec(
+        `DROP TABLE research_draft_links; ALTER TABLE content_ideas DROP COLUMN review_revision;`,
+      );
+      if (version < 4)
+        db.exec(`DROP TABLE idea_reviews;
       DROP TABLE content_ideas;
       DROP TABLE research_results;
       DROP TABLE research_run_items;
@@ -779,6 +783,7 @@ describe('shared drafting services with real SQLite', () => {
       f.provider.generateDraft.mock.calls[0]?.[0].input.writingSamples,
     ).toEqual([malicious]);
     expect(f.registry.all().map((tool) => tool.name)).toEqual([
+      'draft_from_idea',
       'list_review_artifacts',
       'get_review_artifact',
       'delete_review_artifact',

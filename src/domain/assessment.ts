@@ -13,6 +13,7 @@ export interface BodyUnit {
 export interface AssessmentRequest {
   units: Pick<BodyUnit, 'id' | 'text'>[];
   sources: { id: string; excerpt: string }[];
+  publicContext?: { quote: string; verification: 'publisher_reported' };
 }
 const category = z.enum([
   'personal_fact',
@@ -72,6 +73,9 @@ export interface AssessmentFinding {
   quote?: string;
 }
 export interface AssessmentReport {
+  researchPolicyVersion?: string;
+  publicEvidenceHash?: string;
+  publicCitations?: import('./research-draft.js').PublicCitation[];
   version: 'assessment-v1' | typeof ASSESSMENT_VERSION;
   policyVersion: 'exact-attribution-v1' | typeof GROUNDING_POLICY_VERSION;
   bodyHash: string;
@@ -100,6 +104,8 @@ export interface AssessmentReport {
 }
 /** Immutable revision 1. Editing and reassessment are intentionally not exposed. */
 export interface ReviewArtifact extends GeneratedBody {
+  publicCitations?: import('./research-draft.js').PublicCitation[];
+  publicEvidenceHash?: string;
   id: string;
   userId: string;
   runId: string;

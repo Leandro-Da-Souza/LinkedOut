@@ -273,6 +273,7 @@ describe('official MCP client over serialized stdio streams', () => {
       expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
         'delete_research_run',
         'delete_review_artifact',
+        'draft_from_idea',
         'draft_post',
         'get_content_idea',
         'get_draft',
@@ -335,7 +336,7 @@ describe('official MCP client over serialized stdio streams', () => {
       expect(first.stderr()).not.toContain(secret);
     const restarted = await connection(env, true);
     try {
-      expect((await restarted.client.listTools()).tools).toHaveLength(14);
+      expect((await restarted.client.listTools()).tools).toHaveLength(15);
       expect(
         body(
           await restarted.client.callTool({
@@ -481,7 +482,7 @@ describe('official MCP client over serialized stdio streams', () => {
       expect(server.client.getProtocolEra()).toBe('modern');
       expect(server.client.getNegotiatedProtocolVersion()).toBe('2026-07-28');
       expect(server.client.getDiscoverResult()).toBeDefined();
-      expect((await server.client.listTools()).tools).toHaveLength(14);
+      expect((await server.client.listTools()).tools).toHaveLength(15);
       expect(
         body(
           await server.client.callTool({
@@ -578,7 +579,7 @@ describe('official MCP client over serialized stdio streams', () => {
       const server = await subprocessConnection(env);
       let id: string;
       try {
-        expect((await server.client.listTools()).tools).toHaveLength(14);
+        expect((await server.client.listTools()).tools).toHaveLength(15);
         const result = body(
           await server.client.callTool({
             name: 'draft_post',

@@ -1,3 +1,4 @@
+import type { ResearchDraftContext } from '../domain/research-draft.js';
 import type {
   ContentIdea,
   ResearchItem,
@@ -26,6 +27,12 @@ export interface Run {
   draftId: string | null;
   reviewArtifactId: string | null;
   planning: unknown;
+  researchOrigin?: {
+    ideaId: string;
+    researchRunId: string;
+    acceptanceRevision: number;
+    evidenceHash: string;
+  };
   researchResultId?: string | null;
 }
 
@@ -84,6 +91,13 @@ const migrations = [
   );
   ALTER TABLE runs ADD COLUMN research_result_id TEXT;
   ALTER TABLE tool_executions ADD COLUMN research_result_id TEXT;`,
+  `ALTER TABLE content_ideas ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE research_draft_links (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id), user_id TEXT NOT NULL,
+    idea_id TEXT NOT NULL, research_run_id TEXT NOT NULL,
+    acceptance_revision INTEGER NOT NULL, evidence_hash TEXT NOT NULL
+  );
+  CREATE INDEX research_draft_origin ON research_draft_links(user_id, research_run_id);`,
 ];
 
 export class SqliteStore {
@@ -421,6 +435,61 @@ export class SqliteStore {
       };
     });
   }
+  getIdeaDraftState(userId: string, id: string) {
+    return this.guarded(() => {
+      const idea = this.getIdea(userId, id);
+      const row = this.db
+        .prepare(
+          'SELECT review_revision FROM content_ideas WHERE user_id = ? AND id = ?',
+        )
+        .get(userId, id)!;
+      const result = this.db
+        .prepare(
+          'SELECT result_json FROM research_results WHERE user_id = ? AND run_id = ?',
+        )
+        .get(userId, idea.runId);
+      if (!result)
+        throw new AppError(
+          'RESEARCH_EVIDENCE_INVALID',
+          'The original research snapshot is unavailable.',
+        );
+      return {
+        idea,
+        revision: Number(row['review_revision']),
+        result: JSON.parse(String(result['result_json'])) as ResearchResult,
+      };
+    });
+  }
+  hasNewerResearchRevision(userId: string, item: ResearchItem): boolean {
+    return this.guarded(() =>
+      Boolean(
+        this.db
+          .prepare(
+            'SELECT 1 FROM research_items WHERE user_id = ? AND identity = ? AND content_hash <> ? AND retrieved_at > ? LIMIT 1',
+          )
+          .get(userId, item.identity, item.contentHash, item.retrievedAt),
+      ),
+    );
+  }
+  private assertResearchAcceptance(
+    userId: string,
+    origin: ResearchDraftContext,
+  ): void {
+    const row = this.db
+      .prepare(
+        'SELECT status, review_revision FROM content_ideas WHERE user_id = ? AND id = ? AND run_id = ?',
+      )
+      .get(userId, origin.ideaId, origin.researchRunId);
+    if (
+      !row ||
+      row['status'] !== 'accepted' ||
+      Number(row['review_revision']) !== origin.acceptanceRevision
+    )
+      throw new AppError(
+        'RESEARCH_REVIEW_CHANGED',
+        'Idea acceptance changed. Generation is not draft approval; review the idea again.',
+      );
+  }
   reviewIdea(
     userId: string,
     id: string,
@@ -432,7 +501,7 @@ export class SqliteStore {
         if (idea.status !== status) {
           this.db
             .prepare(
-              'UPDATE content_ideas SET status = ? WHERE id = ? AND user_id = ?',
+              'UPDATE content_ideas SET status = ?, review_revision = review_revision + 1 WHERE id = ? AND user_id = ?',
             )
             .run(status, id, userId);
           this.db
@@ -445,8 +514,8 @@ export class SqliteStore {
       }),
     );
   }
-  deleteResearchRun(userId: string, runId: string): void {
-    this.guarded(() =>
+  deleteResearchRun(userId: string, runId: string) {
+    return this.guarded(() =>
       this.transaction(() => {
         const run = this.getRun(userId, runId);
         if (run.kind !== 'research')
@@ -455,6 +524,16 @@ export class SqliteStore {
           throw new AppError(
             'IN_PROGRESS',
             'Cannot delete an active or interrupted research run.',
+          );
+        const derivatives = this.db
+          .prepare(
+            'SELECT r.id, r.status, r.draft_id, r.review_artifact_id FROM research_draft_links l JOIN runs r ON r.id = l.run_id WHERE l.user_id = ? AND l.research_run_id = ?',
+          )
+          .all(userId, runId);
+        if (derivatives.some((row) => row['status'] === 'running'))
+          throw new AppError(
+            'IN_PROGRESS',
+            'A linked drafting run is active or interrupted. Research cannot be deleted.',
           );
         this.db
           .prepare('DELETE FROM content_ideas WHERE user_id = ? AND run_id = ?')
@@ -489,6 +568,13 @@ export class SqliteStore {
         this.db
           .prepare("DELETE FROM research_cache WHERE key <> 'github-cooldown'")
           .run();
+        return {
+          retainedDerivatives: derivatives.map((row) => ({
+            runId: String(row['id']),
+            draftId: row['draft_id'] as string | null,
+            reviewArtifactId: row['review_artifact_id'] as string | null,
+          })),
+        };
       }),
     );
   }
@@ -524,8 +610,17 @@ export class SqliteStore {
     request: unknown,
     key: string | undefined,
     context: ExecutionContext,
+    origin?: ResearchDraftContext,
   ): { runId: string; draft?: Draft } {
-    return this.reserveRun('draft', userId, requestHash, request, key, context);
+    return this.reserveRun(
+      'draft',
+      userId,
+      requestHash,
+      request,
+      key,
+      context,
+      origin,
+    );
   }
   private reserveRun(
     kind: Run['kind'],
@@ -534,9 +629,11 @@ export class SqliteStore {
     request: unknown,
     key: string | undefined,
     context: ExecutionContext,
+    origin?: ResearchDraftContext,
   ): { runId: string; draft?: Draft } {
     return this.guarded(() =>
       this.transaction(() => {
+        if (origin) this.assertResearchAcceptance(userId, origin);
         if (key) {
           const previous = this.db
             .prepare(
@@ -583,6 +680,19 @@ export class SqliteStore {
             requestHash,
             JSON.stringify(request),
           );
+        if (origin)
+          this.db
+            .prepare(
+              'INSERT INTO research_draft_links (run_id, user_id, idea_id, research_run_id, acceptance_revision, evidence_hash) VALUES (?, ?, ?, ?, ?, ?)',
+            )
+            .run(
+              runId,
+              userId,
+              origin.ideaId,
+              origin.researchRunId,
+              origin.acceptanceRevision,
+              origin.evidenceHash,
+            );
         return { runId };
       }),
     );
@@ -594,9 +704,16 @@ export class SqliteStore {
         .run(JSON.stringify(planning), runId),
     );
   }
-  completeDraft(draft: Draft): void {
+  completeDraft(draft: Draft, validateResearch?: () => void): void {
     this.guarded(() =>
       this.transaction(() => {
+        if (draft.provenance.research) {
+          this.assertResearchAcceptance(
+            draft.userId,
+            draft.provenance.research,
+          );
+          validateResearch?.();
+        }
         this.db
           .prepare(
             'INSERT INTO drafts (id, user_id, run_id, created_at, draft_json) VALUES (?, ?, ?, ?, ?)',
@@ -838,7 +955,22 @@ export class SqliteStore {
     );
   }
   private runFromRow(row: Record<string, unknown>): Run {
+    const link = this.db
+      .prepare(
+        'SELECT * FROM research_draft_links WHERE run_id = ? AND user_id = ?',
+      )
+      .get(String(row['id']), String(row['user_id']));
     return {
+      ...(link
+        ? {
+            researchOrigin: {
+              ideaId: String(link['idea_id']),
+              researchRunId: String(link['research_run_id']),
+              acceptanceRevision: Number(link['acceptance_revision']),
+              evidenceHash: String(link['evidence_hash']),
+            },
+          }
+        : {}),
       id: String(row['id']),
       userId: String(row['user_id']),
       kind: row['kind'] as Run['kind'],

@@ -62,6 +62,7 @@ try {
     [
       'delete_research_run',
       'delete_review_artifact',
+      'draft_from_idea',
       'draft_post',
       'get_content_idea',
       'get_draft',
@@ -85,17 +86,26 @@ try {
       }),
     ).draft;
   } else {
+    const tool = process.env.LINKEDOUT_TEST_IDEA_ID
+      ? 'draft_from_idea'
+      : 'draft_post';
     const args = {
-      brief: 'Shell smoke drafting with user preferences',
+      ...(process.env.LINKEDOUT_TEST_IDEA_ID
+        ? { ideaId: process.env.LINKEDOUT_TEST_IDEA_ID }
+        : { brief: 'Shell smoke drafting with user preferences' }),
       idempotencyKey: 'shell-smoke',
     };
-    const result = body(
-      await client.callTool({ name: 'draft_post', arguments: args }),
-    );
+    const result = body(await client.callTool({ name: tool, arguments: args }));
     draft = result.draft;
-    const replay = body(
-      await client.callTool({ name: 'draft_post', arguments: args }),
-    );
+    if (process.env.LINKEDOUT_TEST_IDEA_ID) {
+      assert.equal(draft.publicCitations[0].kind, 'research_attachment');
+      assert.equal(draft.review.required, true);
+      assert.equal(
+        draft.provenance.research.ideaId,
+        process.env.LINKEDOUT_TEST_IDEA_ID,
+      );
+    }
+    const replay = body(await client.callTool({ name: tool, arguments: args }));
     assert.equal(replay.replayed, true);
     assert.equal(replay.draft.id, draft.id);
     assert.equal(

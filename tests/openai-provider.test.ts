@@ -1,3 +1,5 @@
+import { RESEARCH_SOURCES } from '../src/domain/research.js';
+import type { ResearchDraftContext } from '../src/domain/research-draft.js';
 import OpenAI from 'openai';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -496,5 +498,141 @@ describe('research planning through real SDK with local HTTP fixtures', () => {
       ),
     ).rejects.toMatchObject({ code: 'WORKFLOW_LIMIT' });
     expect(requests).toHaveLength(1);
+  });
+});
+
+const researchDraftFixture: ResearchDraftContext = {
+  ideaId: 'synthetic-idea',
+  researchRunId: 'synthetic-run',
+  acceptanceRevision: 1,
+  evidenceHash: 'synthetic-evidence-hash',
+  quote: 'UNTRUSTED_PUBLIC: We shipped the synthetic release.',
+  policy: RESEARCH_SOURCES[0]!,
+  item: {
+    id: 'synthetic-public',
+    identity: 'microsoft/typescript:1',
+    repository: 'microsoft/TypeScript',
+    releaseId: 1,
+    url: 'https://github.com/microsoft/TypeScript/releases/tag/v1',
+    title: 'Synthetic',
+    tag: 'v1',
+    publishedAt: '2026-10-15T00:00:00.000Z',
+    rawPublicationDate: '2026-10-15T00:00:00Z',
+    dateQuality: 'valid',
+    retrievedAt: '2026-10-16T00:00:00.000Z',
+    excerpt: 'UNTRUSTED_PUBLIC: We shipped the synthetic release.',
+    contentHash: 'a'.repeat(64),
+    prerelease: false,
+    truncated: false,
+    source: RESEARCH_SOURCES[0]!,
+    verification: 'publisher_reported',
+  },
+};
+describe('research drafting through real SDK with local HTTP fixtures', () => {
+  it('keeps research untrusted and separate, requests commentary only, and bounds generation', async () => {
+    const f = fixture([textDraft()]);
+    await f.provider.generateDraft(
+      {
+        input: { brief: 'Synthetic idea' },
+        profile,
+        research: researchDraftFixture,
+        commentaryLimit: 2000,
+      },
+      signal(),
+    );
+    const request = f.requests[0]!;
+    expect(request).toMatchObject({ store: false, max_output_tokens: 2000 });
+    expect(request.tools).toBeUndefined();
+    const input = request.input as { role: string; content: string }[];
+    expect(input[0]!.content).toContain('not draft approval');
+    expect(input[0]!.content).not.toContain('UNTRUSTED_PUBLIC');
+    expect(JSON.parse(input[1]!.content)).toMatchObject({
+      research: researchDraftFixture,
+      commentaryLimit: 2000,
+    });
+  });
+  it('assesses only commentary with public context ineligible as private evidence', async () => {
+    const f = fixture([
+      textDraft(
+        JSON.stringify({
+          units: [
+            { id: 'u0', category: 'advice_opinion_question', evidence: null },
+          ],
+        }),
+      ),
+    ]);
+    await f.provider.assessDraft(
+      {
+        units: [{ id: 'u0', text: 'What would you evaluate?' }],
+        sources: [],
+        publicContext: {
+          quote: researchDraftFixture.quote,
+          verification: 'publisher_reported',
+        },
+      },
+      signal(),
+    );
+    expect(f.requests[0]).toMatchObject({
+      max_output_tokens: 6000,
+      store: false,
+    });
+    const input = f.requests[0]!.input as { content: string }[];
+    expect(input[0]!.content).toContain('never eligible evidence');
+    expect(JSON.parse(input[1]!.content).sources).toEqual([]);
+  });
+  it('never retries either research drafting operation', async () => {
+    const f = fixture([], { httpStatus: 500 });
+    await expect(
+      f.provider.generateDraft(
+        {
+          input: { brief: 'Synthetic' },
+          profile,
+          research: researchDraftFixture,
+        },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+    expect(f.requests).toHaveLength(1);
+    await expect(
+      f.provider.assessDraft(
+        {
+          units: [],
+          sources: [],
+          publicContext: {
+            quote: researchDraftFixture.quote,
+            verification: 'publisher_reported',
+          },
+        },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+    expect(f.requests).toHaveLength(2);
+  });
+  it('rejects oversized inputs before any SDK request', async () => {
+    const f = fixture([]);
+    await expect(
+      f.provider.generateDraft(
+        {
+          input: { brief: 'x'.repeat(40_000) },
+          profile,
+          research: researchDraftFixture,
+        },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'WORKFLOW_LIMIT' });
+    await expect(
+      f.provider.assessDraft(
+        {
+          units: [{ id: 'u0', text: 'x'.repeat(40_000) }],
+          sources: [],
+          publicContext: {
+            quote: researchDraftFixture.quote,
+            verification: 'publisher_reported',
+          },
+        },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'WORKFLOW_LIMIT' });
+    expect(f.requests).toHaveLength(0);
   });
 });

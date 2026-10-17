@@ -18,6 +18,8 @@ flowchart TD
 
 Milestone 2 adds a fixed research workflow alongside drafting, with official release ingestion, deterministic scoring, and persistent review-required ideas. See [the release-to-idea architecture](milestone-two.md).
 
+Milestone 2.5 connects accepted ideas to the shared drafting service with application-owned public research attachments, separate public citations and private knowledge, review revision checks, and retained blocked artifacts. Acceptance authorizes generation only; every draft still requires human review. See [the research-to-draft workflow](milestone-2.5.md).
+
 ## Boundaries and choices
 
 | Layer                | Responsibility                                                                                       |

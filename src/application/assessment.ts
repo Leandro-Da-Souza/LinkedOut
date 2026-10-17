@@ -35,6 +35,7 @@ export function assessBody(
   knowledge: KnowledgeContext,
   profile: UserProfile,
   raw: unknown,
+  researchCommentary = false,
 ): { report: AssessmentReport; claims: GeneratedDraft['claims'] } {
   const units = bodyUnits(body.body);
   const report: AssessmentReport = {
@@ -106,6 +107,8 @@ export function assessBody(
         if (assessed.category === 'uncertain')
           report.issues.push('UNCERTAIN_CONTENT');
         if (assessed.category === 'advice_opinion_question') continue;
+        if (researchCommentary && assessed.category === 'general_fact')
+          report.issues.push('UNSUPPORTED_FACT');
         const evidence = assessed.evidence;
         const source = knowledge.sources.find(
           (entry) => entry.id === evidence?.sourceId,

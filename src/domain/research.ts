@@ -28,7 +28,12 @@ export interface ResearchSource {
   aliases: string[];
   origin: 'github_public_releases';
   role: 'primary';
-  permittedUses: readonly ['local_research', 'model_planning'];
+  permittedUses: readonly (
+    | 'local_research'
+    | 'model_planning'
+    | 'model_drafting'
+    | 'local_attributed_quotation'
+  )[];
   retention: 'unreferenced_90_days';
 }
 const source = (
@@ -41,7 +46,12 @@ const source = (
   aliases,
   origin: 'github_public_releases',
   role: 'primary',
-  permittedUses: ['local_research', 'model_planning'],
+  permittedUses: [
+    'local_research',
+    'model_planning',
+    'model_drafting',
+    'local_attributed_quotation',
+  ],
   retention: 'unreferenced_90_days',
 });
 export const RESEARCH_SOURCES: readonly ResearchSource[] = [

@@ -1,3 +1,4 @@
+import { ideaDraftInputSchema } from '../domain/research-draft.js';
 import {
   RESEARCH_SOURCES,
   researchInputSchema,
@@ -178,22 +179,32 @@ export function createTools(
         {
           name: 'delete_research_run',
           description:
-            'Delete a completed research run payload and its ideas. Retain safe history and key tombstone. Does not erase backups.',
+            'Delete a completed research run payload and its ideas. Retain derived drafts/artifacts with frozen evidence, safe history and key tombstone. Return retained derivative IDs. Does not erase backups.',
           permission: 'delete_local',
           inputSchema: getDraftSchema,
           readOnly: false,
           execute: async (input) => {
-            store.deleteResearchRun(
+            const retained = store.deleteResearchRun(
               profile.id,
               parseInput(getDraftSchema, input).id,
             );
-            return { deleted: true };
+            return { deleted: true, ...retained };
           },
         },
       ]
     : [];
   return new ToolRegistry([
     ...researchTools,
+    {
+      name: 'draft_from_idea',
+      description:
+        'Generate a human-review-required draft from an accepted idea and its stored research attachment. Acceptance authorizes generation only, never approval, publishing or messaging. Two bounded model operations; no public refresh.',
+      permission: 'draft_local',
+      inputSchema: ideaDraftInputSchema,
+      readOnly: false,
+      openWorld: true,
+      execute: (input, context) => service.createFromIdea(input, context),
+    },
     {
       name: 'list_review_artifacts',
       description:
